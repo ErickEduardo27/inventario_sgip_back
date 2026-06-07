@@ -1,0 +1,1 @@
+"""Envío de correo (stub)."""

@@ -1,0 +1,1 @@
+"""Encuestas por WhatsApp."""

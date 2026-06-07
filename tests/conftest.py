@@ -1,0 +1,1 @@
+"""Fixtures de pytest (stub)."""
