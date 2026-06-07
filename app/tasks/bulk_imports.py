@@ -1,17 +1,18 @@
-"""Tareas Celery: importación masiva por módulo (archivo temporal → COPY)."""
+"""Tareas Celery: importación masiva por módulo (GCS → COPY → import_jobs)."""
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any, Callable
 from uuid import UUID
 
 from app.celery_app import celery_app
+from app.core.import_storage import delete_import_file, download_import_file
 from app.db.session import SessionLocal
 from app.modules.inventory import (
     cost_center_import,
     environment_import,
     establishment_import,
+    import_jobs_service as jobs_svc,
     list_sbn_import,
     margesi_import,
     person_import,
@@ -40,83 +41,142 @@ def _progress_meta(
     }
 
 
-def _run_file_import(
+def _run_gcs_import(
     task,
     *,
+    job_id: str,
     tenant_id: str,
-    file_path: str,
+    gcs_path: str,
     filename: str,
     processor: Callable[..., dict[str, Any]],
     extra_kwargs: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    path = Path(file_path)
     extra_kwargs = extra_kwargs or {}
+    job_uuid = UUID(job_id)
+    tenant_uuid = UUID(tenant_id)
+
     try:
-        content = path.read_bytes()
+        with SessionLocal() as db:
+            job = jobs_svc.get_import_job(db, job_uuid, tenant_uuid)
+            if job is None:
+                return {
+                    "success": False,
+                    "message": "Trabajo de importación no encontrado",
+                    "errors": ["import_jobs: registro inexistente"],
+                }
+            jobs_svc.mark_processing(db, job)
+            db.commit()
+
         task.update_state(
             state="PROGRESS",
-            meta=_progress_meta(1, 0, 0, 0, message="Leyendo archivo…"),
+            meta=_progress_meta(1, 0, 0, 0, message="Descargando archivo…"),
         )
+        content = download_import_file(gcs_path)
+
         with SessionLocal() as db:
+            job = jobs_svc.get_import_job(db, job_uuid, tenant_uuid)
+            if job is None:
+                return {
+                    "success": False,
+                    "message": "Trabajo de importación no encontrado",
+                    "errors": ["import_jobs: registro inexistente"],
+                }
 
             def progress_cb(percent: int, total: int, updated: int, inserted: int) -> None:
-                task.update_state(
-                    state="PROGRESS",
-                    meta=_progress_meta(percent, total, updated, inserted),
+                meta = _progress_meta(percent, total, updated, inserted)
+                task.update_state(state="PROGRESS", meta=meta)
+                jobs_svc.update_progress(
+                    db,
+                    job,
+                    progress=int(meta["progress"]),
+                    total_rows=int(meta["total_rows"]),
+                    processed=int(meta["processed"]),
+                    inserted=int(meta["inserted"]),
+                    updated=int(meta["updated"]),
+                    registered=int(meta["registered"]),
+                    message=str(meta["message"]),
                 )
+                db.commit()
 
-            return processor(
+            result = processor(
                 db,
-                UUID(tenant_id),
+                tenant_uuid,
                 content,
                 filename,
                 progress_cb=progress_cb,
                 **extra_kwargs,
             )
+
+            job = jobs_svc.get_import_job(db, job_uuid, tenant_uuid)
+            if job is not None:
+                jobs_svc.finalize_from_result(db, job, result)
+                db.commit()
+            return result
+    except Exception as exc:  # noqa: BLE001
+        with SessionLocal() as db:
+            job = jobs_svc.get_import_job(db, job_uuid, tenant_uuid)
+            if job is not None:
+                jobs_svc.mark_failure(db, job, message="Error en la importación", errors=[str(exc)])
+                db.commit()
+        return {
+            "success": False,
+            "message": "Error en la importación",
+            "errors": [str(exc)],
+        }
     finally:
-        if path.exists():
-            path.unlink(missing_ok=True)
+        delete_import_file(gcs_path)
 
 
 @celery_app.task(bind=True, name="imports.establishments")
-def import_establishments_task(self, tenant_id: str, file_path: str, filename: str) -> dict:
-    return _run_file_import(
+def import_establishments_task(self, job_id: str, tenant_id: str, gcs_path: str, filename: str) -> dict:
+    return _run_gcs_import(
         self,
+        job_id=job_id,
         tenant_id=tenant_id,
-        file_path=file_path,
+        gcs_path=gcs_path,
         filename=filename,
         processor=establishment_import.process_establishment_upload,
     )
 
 
 @celery_app.task(bind=True, name="imports.environments")
-def import_environments_task(self, tenant_id: str, file_path: str, filename: str) -> dict:
-    return _run_file_import(
+def import_environments_task(self, job_id: str, tenant_id: str, gcs_path: str, filename: str) -> dict:
+    return _run_gcs_import(
         self,
+        job_id=job_id,
         tenant_id=tenant_id,
-        file_path=file_path,
+        gcs_path=gcs_path,
         filename=filename,
         processor=environment_import.process_environment_upload,
     )
 
 
 @celery_app.task(bind=True, name="imports.cost_centers")
-def import_cost_centers_task(self, tenant_id: str, file_path: str, filename: str) -> dict:
-    return _run_file_import(
+def import_cost_centers_task(self, job_id: str, tenant_id: str, gcs_path: str, filename: str) -> dict:
+    return _run_gcs_import(
         self,
+        job_id=job_id,
         tenant_id=tenant_id,
-        file_path=file_path,
+        gcs_path=gcs_path,
         filename=filename,
         processor=cost_center_import.process_cost_center_upload,
     )
 
 
 @celery_app.task(bind=True, name="imports.persons")
-def import_persons_task(self, tenant_id: str, file_path: str, filename: str, person_type: str) -> dict:
-    return _run_file_import(
+def import_persons_task(
+    self,
+    job_id: str,
+    tenant_id: str,
+    gcs_path: str,
+    filename: str,
+    person_type: str,
+) -> dict:
+    return _run_gcs_import(
         self,
+        job_id=job_id,
         tenant_id=tenant_id,
-        file_path=file_path,
+        gcs_path=gcs_path,
         filename=filename,
         processor=person_import.process_person_upload,
         extra_kwargs={"person_type": person_type},
@@ -124,33 +184,36 @@ def import_persons_task(self, tenant_id: str, file_path: str, filename: str, per
 
 
 @celery_app.task(bind=True, name="imports.list_sbn")
-def import_list_sbn_task(self, tenant_id: str, file_path: str, filename: str) -> dict:
-    return _run_file_import(
+def import_list_sbn_task(self, job_id: str, tenant_id: str, gcs_path: str, filename: str) -> dict:
+    return _run_gcs_import(
         self,
+        job_id=job_id,
         tenant_id=tenant_id,
-        file_path=file_path,
+        gcs_path=gcs_path,
         filename=filename,
         processor=list_sbn_import.process_list_sbn_upload,
     )
 
 
 @celery_app.task(bind=True, name="imports.margesi")
-def import_margesi_task(self, tenant_id: str, file_path: str, filename: str) -> dict:
-    return _run_file_import(
+def import_margesi_task(self, job_id: str, tenant_id: str, gcs_path: str, filename: str) -> dict:
+    return _run_gcs_import(
         self,
+        job_id=job_id,
         tenant_id=tenant_id,
-        file_path=file_path,
+        gcs_path=gcs_path,
         filename=filename,
         processor=margesi_import.process_margesi_upload,
     )
 
 
 @celery_app.task(bind=True, name="imports.margesi_moment")
-def import_margesi_moment_task(self, tenant_id: str, file_path: str, filename: str) -> dict:
-    return _run_file_import(
+def import_margesi_moment_task(self, job_id: str, tenant_id: str, gcs_path: str, filename: str) -> dict:
+    return _run_gcs_import(
         self,
+        job_id=job_id,
         tenant_id=tenant_id,
-        file_path=file_path,
+        gcs_path=gcs_path,
         filename=filename,
         processor=margesi_import.process_margesi_moment_upload,
     )

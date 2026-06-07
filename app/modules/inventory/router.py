@@ -188,7 +188,7 @@ async def establishments_import(
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
     tenant_id: UUID = Depends(get_tenant_id),
-    _: User = Depends(get_current_user),
+    user: User = Depends(get_current_user),
 ):
     try:
         content, filename = await imp_common.read_upload_bytes(file)
@@ -198,15 +198,15 @@ async def establishments_import(
 
     from app.tasks.bulk_imports import import_establishments_task
 
-    result = imp_common.dispatch_sync_or_celery(
+    result = imp_common.dispatch_import_job(
+        db=db,
         content=content,
         filename=filename,
         tenant_id=tenant_id,
-        db=db,
+        module="establishments",
         row_count=int(len(df)),
-        temp_prefix="locales_import_",
         celery_task=import_establishments_task,
-        sync_processor=est_import.process_establishment_upload,
+        created_by_id=user.id,
     )
     if not result.get("success") and result.get("errors"):
         raise HTTPException(status_code=400, detail=result["errors"][0])
@@ -214,13 +214,29 @@ async def establishments_import(
 
 
 @router.get("/import/jobs/{job_id}", response_model=ImportJobStatus)
-def import_job_status(job_id: str):
-    return ImportJobStatus(**imp_common.celery_import_job_status(job_id))
+def import_job_status(
+    job_id: UUID,
+    db: Session = Depends(get_db),
+    tenant_id: UUID = Depends(get_tenant_id),
+    _: User = Depends(get_current_user),
+):
+    try:
+        return ImportJobStatus(**imp_common.get_import_job_status(db, job_id, tenant_id))
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @router.get("/establishments/import/jobs/{job_id}", response_model=EstablishmentImportJobStatus)
-def establishments_import_job_status(job_id: str):
-    payload = imp_common.celery_import_job_status(job_id)
+def establishments_import_job_status(
+    job_id: UUID,
+    db: Session = Depends(get_db),
+    tenant_id: UUID = Depends(get_tenant_id),
+    _: User = Depends(get_current_user),
+):
+    try:
+        payload = imp_common.get_import_job_status(db, job_id, tenant_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
     return EstablishmentImportJobStatus(
         job_id=payload["job_id"],
         state=payload["state"],
@@ -283,7 +299,7 @@ async def persons_import(
     type: str = Query("customers", description="Tipo de persona para todas las filas (ej. customers, suppliers)"),
     db: Session = Depends(get_db),
     tenant_id: UUID = Depends(get_tenant_id),
-    _: User = Depends(get_current_user),
+    user: User = Depends(get_current_user),
 ):
     try:
         content, filename = await imp_common.read_upload_bytes(file)
@@ -293,17 +309,17 @@ async def persons_import(
 
     from app.tasks.bulk_imports import import_persons_task
 
-    result = imp_common.dispatch_sync_or_celery(
+    result = imp_common.dispatch_import_job(
+        db=db,
         content=content,
         filename=filename,
         tenant_id=tenant_id,
-        db=db,
+        module="persons",
         row_count=int(len(df)),
-        temp_prefix="persons_import_",
         celery_task=import_persons_task,
-        sync_processor=person_import_mod.process_person_upload,
         celery_args=(type,),
-        sync_kwargs={"person_type": type},
+        created_by_id=user.id,
+        extra={"person_type": type},
     )
     if not result.get("success") and result.get("errors"):
         raise HTTPException(status_code=400, detail=result["errors"][0])
@@ -351,7 +367,7 @@ async def cost_centers_import(
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
     tenant_id: UUID = Depends(get_tenant_id),
-    _: User = Depends(get_current_user),
+    user: User = Depends(get_current_user),
 ):
     try:
         content, filename = await imp_common.read_upload_bytes(file)
@@ -361,15 +377,15 @@ async def cost_centers_import(
 
     from app.tasks.bulk_imports import import_cost_centers_task
 
-    result = imp_common.dispatch_sync_or_celery(
+    result = imp_common.dispatch_import_job(
+        db=db,
         content=content,
         filename=filename,
         tenant_id=tenant_id,
-        db=db,
+        module="cost_centers",
         row_count=int(len(df)),
-        temp_prefix="cost_center_import_",
         celery_task=import_cost_centers_task,
-        sync_processor=cc_import.process_cost_center_upload,
+        created_by_id=user.id,
     )
     if not result.get("success") and result.get("errors"):
         raise HTTPException(status_code=400, detail=result["errors"][0])
@@ -425,7 +441,7 @@ async def environments_import(
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
     tenant_id: UUID = Depends(get_tenant_id),
-    _: User = Depends(get_current_user),
+    user: User = Depends(get_current_user),
 ):
     try:
         content, filename = await imp_common.read_upload_bytes(file)
@@ -435,15 +451,15 @@ async def environments_import(
 
     from app.tasks.bulk_imports import import_environments_task
 
-    result = imp_common.dispatch_sync_or_celery(
+    result = imp_common.dispatch_import_job(
+        db=db,
         content=content,
         filename=filename,
         tenant_id=tenant_id,
-        db=db,
+        module="environments",
         row_count=int(len(df)),
-        temp_prefix="environments_import_",
         celery_task=import_environments_task,
-        sync_processor=env_import.process_environment_upload,
+        created_by_id=user.id,
     )
     if not result.get("success") and result.get("errors"):
         raise HTTPException(status_code=400, detail=result["errors"][0])
@@ -767,7 +783,7 @@ async def list_sbn_import(
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
     tenant_id: UUID = Depends(get_tenant_id),
-    _: User = Depends(get_current_user),
+    user: User = Depends(get_current_user),
 ):
     try:
         content, filename = await imp_common.read_upload_bytes(file)
@@ -777,15 +793,15 @@ async def list_sbn_import(
 
     from app.tasks.bulk_imports import import_list_sbn_task
 
-    result = imp_common.dispatch_sync_or_celery(
+    result = imp_common.dispatch_import_job(
+        db=db,
         content=content,
         filename=filename,
         tenant_id=tenant_id,
-        db=db,
+        module="list_sbn",
         row_count=int(len(df)),
-        temp_prefix="list_sbn_import_",
         celery_task=import_list_sbn_task,
-        sync_processor=list_sbn_import_mod.process_list_sbn_upload,
+        created_by_id=user.id,
     )
     if not result.get("success") and result.get("errors"):
         raise HTTPException(status_code=400, detail=result["errors"][0])
@@ -832,7 +848,7 @@ async def margesi_import(
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
     tenant_id: UUID = Depends(get_tenant_id),
-    _: User = Depends(get_current_user),
+    user: User = Depends(get_current_user),
 ):
     try:
         content, filename = await imp_common.read_upload_bytes(file)
@@ -842,15 +858,15 @@ async def margesi_import(
 
     from app.tasks.bulk_imports import import_margesi_task
 
-    result = imp_common.dispatch_sync_or_celery(
+    result = imp_common.dispatch_import_job(
+        db=db,
         content=content,
         filename=filename,
         tenant_id=tenant_id,
-        db=db,
+        module="margesi",
         row_count=int(len(df)),
-        temp_prefix="margesi_import_",
         celery_task=import_margesi_task,
-        sync_processor=margesi_import_mod.process_margesi_upload,
+        created_by_id=user.id,
     )
     if not result.get("success") and result.get("errors"):
         raise HTTPException(status_code=400, detail=result["errors"][0])
@@ -862,7 +878,7 @@ async def margesi_import_moment(
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
     tenant_id: UUID = Depends(get_tenant_id),
-    _: User = Depends(get_current_user),
+    user: User = Depends(get_current_user),
 ):
     try:
         content, filename = await imp_common.read_upload_bytes(file)
@@ -872,15 +888,15 @@ async def margesi_import_moment(
 
     from app.tasks.bulk_imports import import_margesi_moment_task
 
-    result = imp_common.dispatch_sync_or_celery(
+    result = imp_common.dispatch_import_job(
+        db=db,
         content=content,
         filename=filename,
         tenant_id=tenant_id,
-        db=db,
+        module="margesi_moment",
         row_count=int(len(df)),
-        temp_prefix="margesi_moment_import_",
         celery_task=import_margesi_moment_task,
-        sync_processor=margesi_import_mod.process_margesi_moment_upload,
+        created_by_id=user.id,
     )
     if not result.get("success") and result.get("errors"):
         raise HTTPException(status_code=400, detail=result["errors"][0])

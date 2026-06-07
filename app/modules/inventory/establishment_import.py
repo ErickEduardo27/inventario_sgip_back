@@ -24,7 +24,7 @@ from sqlalchemy.orm import Session
 from app.modules.inventory import geo_catalog as geo
 
 DEFAULT_COUNTRY_ID = "PE"
-from app.modules.inventory.import_common import ASYNC_IMPORT_THRESHOLD, save_upload_temp as _save_upload_temp
+from app.modules.inventory.import_common import ASYNC_IMPORT_THRESHOLD
 MAX_IMPORT_ERRORS = 200
 
 _IMPORT_FIELD_NAMES = (
@@ -388,7 +388,3 @@ def process_establishment_upload(
                 f"{result['message']}. {len(validation_errors)} fila(s) omitida(s) por validación."
             )
     return result
-
-
-def save_upload_temp(content: bytes, filename: str) -> Path:
-    return _save_upload_temp(content, filename, prefix="locales_import_")

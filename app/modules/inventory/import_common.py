@@ -1,26 +1,20 @@
-"""Utilidades compartidas para importación masiva (archivo → temp → Celery → COPY)."""
+"""Utilidades compartidas para importación masiva (GCS → import_jobs → Celery → COPY)."""
 
 from __future__ import annotations
 
-import tempfile
-from pathlib import Path
+import io
+import uuid
 from typing import Any
+from uuid import UUID
 
 import pandas as pd
+from sqlalchemy.orm import Session
+
+from app.core.import_storage import upload_import_file
+from app.modules.inventory import import_jobs_service as jobs_svc
 
 # Las importaciones masivas siempre se encolan en Celery (background).
 ASYNC_IMPORT_THRESHOLD = 0
-
-
-def save_upload_temp(content: bytes, filename: str, *, prefix: str = "import_") -> Path:
-    suffix = Path(filename).suffix or ".xlsx"
-    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix, prefix=prefix)
-    try:
-        tmp.write(content)
-        tmp.flush()
-        return Path(tmp.name)
-    finally:
-        tmp.close()
 
 
 def count_data_rows(content: bytes, filename: str) -> int:
@@ -36,8 +30,6 @@ def count_data_rows(content: bytes, filename: str) -> int:
 
 def count_data_rows_raw(content: bytes, filename: str) -> int:
     """Cuenta filas de datos leyendo solo el archivo (sin validar columnas)."""
-    import io
-
     lower = filename.lower()
     if lower.endswith(".csv"):
         text = content.decode("utf-8-sig", errors="replace")
@@ -49,7 +41,15 @@ def count_data_rows_raw(content: bytes, filename: str) -> int:
     return max(0, int(len(raw)) - 1)
 
 
+def get_import_job_status(db: Session, job_id: UUID, tenant_id: UUID) -> dict[str, Any]:
+    job = jobs_svc.get_import_job(db, job_id, tenant_id)
+    if job is None:
+        raise LookupError("Trabajo de importación no encontrado")
+    return jobs_svc.job_to_status_payload(job)
+
+
 def celery_import_job_status(job_id: str) -> dict[str, Any]:
+    """Compatibilidad: estado desde Celery/Redis (jobs antiguos sin fila en BD)."""
     from celery.result import AsyncResult
 
     from app.celery_app import celery_app
@@ -147,24 +147,80 @@ async def read_upload_bytes(file) -> tuple[bytes, str]:
     return content, filename
 
 
+def dispatch_import_job(
+    *,
+    db: Session,
+    content: bytes,
+    filename: str,
+    tenant_id: UUID,
+    module: str,
+    row_count: int,
+    celery_task,
+    celery_args: tuple = (),
+    created_by_id: UUID | None = None,
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Sube a GCS, crea ``import_jobs`` y encola Celery con ``job_id`` + ``gcs_path``."""
+    job_id = uuid.uuid4()
+    gcs_path = upload_import_file(
+        module=module,
+        tenant_id=tenant_id,
+        job_id=job_id,
+        filename=filename,
+        content=content,
+    )
+
+    job = jobs_svc.create_import_job(
+        db,
+        job_id=job_id,
+        tenant_id=tenant_id,
+        module=module,
+        filename=filename,
+        gcs_path=gcs_path,
+        total_rows=row_count,
+        created_by_id=created_by_id,
+        extra=extra,
+    )
+    db.commit()
+
+    task = celery_task.delay(str(job_id), str(tenant_id), gcs_path, filename, *celery_args)
+    jobs_svc.set_celery_task_id(db, job, task.id)
+    db.commit()
+
+    return make_async_response(task_id=str(job_id), row_count=row_count)
+
+
 def dispatch_sync_or_celery(
     *,
     content: bytes,
     filename: str,
     tenant_id,
-    db,
+    db: Session,
     row_count: int,
     temp_prefix: str,
     celery_task,
     sync_processor,
     celery_args: tuple = (),
     sync_kwargs: dict | None = None,
+    module: str | None = None,
+    created_by_id: UUID | None = None,
+    extra: dict | None = None,
 ) -> dict[str, Any]:
-    """Guarda el archivo y encola siempre la importación en Celery."""
-    del db, sync_processor, sync_kwargs  # procesamiento solo en el worker
-    temp_path = save_upload_temp(content, filename, prefix=temp_prefix)
-    task = celery_task.delay(str(tenant_id), str(temp_path), filename, *celery_args)
-    return make_async_response(task_id=task.id, row_count=row_count)
+    del temp_prefix, sync_processor, sync_kwargs
+    if module is None:
+        raise ValueError("module es obligatorio para dispatch_import_job")
+    return dispatch_import_job(
+        db=db,
+        content=content,
+        filename=filename,
+        tenant_id=tenant_id,
+        module=module,
+        row_count=row_count,
+        celery_task=celery_task,
+        celery_args=celery_args,
+        created_by_id=created_by_id,
+        extra=extra,
+    )
 
 
 def make_async_response(

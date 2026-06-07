@@ -411,7 +411,7 @@ class MargesiImportResult(BaseModel):
 
 
 class ImportJobStatus(BaseModel):
-    """Estado de tarea Celery de importación masiva."""
+    """Estado de trabajo de importación masiva (persistido en ``import_jobs``)."""
 
     job_id: str
     state: str

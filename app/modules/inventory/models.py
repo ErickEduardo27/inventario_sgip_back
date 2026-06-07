@@ -362,3 +362,35 @@ class InvListSbn(Base, TenantMixin, TimestampMixin):
     cat_obs: Mapped[str | None] = mapped_column(Text, nullable=True)
     user_create: Mapped[str | None] = mapped_column(String(200), nullable=True)
     extra: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+
+
+class InvImportJob(Base, TenantMixin, TimestampMixin):
+    """Trabajo de importación masiva (archivo en GCS + procesamiento Celery)."""
+
+    __tablename__ = "import_jobs"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    celery_task_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    module: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    filename: Mapped[str] = mapped_column(String(500), nullable=False)
+    gcs_path: Mapped[str] = mapped_column(String(1000), nullable=False)
+    state: Mapped[str] = mapped_column(String(32), nullable=False, default="pending", index=True)
+    progress: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    total_rows: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    processed: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    inserted: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    updated: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    registered: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    message: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    errors: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, default=list)
+    created_by_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    extra: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)

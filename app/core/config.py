@@ -108,6 +108,23 @@ class Settings(BaseSettings):
         description="Backend de resultados Celery (ej. redis://127.0.0.1:6379/1). Vacío = mismo host que broker o deshabilitado según Celery.",
     )
 
+    gcs_bucket: str = Field(
+        default="",
+        description="Bucket de Google Cloud Storage para archivos de importación. Vacío = almacenamiento local temporal (solo desarrollo).",
+    )
+    gcs_import_prefix: str = Field(
+        default="imports",
+        description="Prefijo de objetos GCS para imports (ej. imports/margesi/...).",
+    )
+    google_application_credentials: str = Field(
+        default="",
+        validation_alias=AliasChoices(
+            "GOOGLE_APPLICATION_CREDENTIALS",
+            "GCS_CREDENTIALS_PATH",
+        ),
+        description="Ruta al JSON de cuenta de servicio GCS. Vacío = Application Default Credentials (Cloud Run).",
+    )
+
     @property
     def seed_demo_user_requested(self) -> bool:
         return os.getenv("SEED_DEMO_USER", "").lower() in ("1", "true", "yes")
