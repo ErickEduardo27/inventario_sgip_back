@@ -88,7 +88,8 @@ def delete_import_file(storage_path: str) -> None:
         return
     client = _gcs_client()
     blob = client.bucket(settings.gcs_bucket).blob(storage_path)
-    blob.delete(missing_ok=True)
+    if blob.exists():
+        blob.delete()
 
 
 def _gcs_client():
