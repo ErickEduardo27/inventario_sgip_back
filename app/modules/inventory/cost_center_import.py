@@ -127,16 +127,31 @@ def bulk_import_cost_centers(
     progress_cb=None,
 ) -> dict[str, Any]:
     df, total_in_file = parse_cost_center_data_rows(content, filename)
-    staging: list[list[str]] = []
     warnings: list[str] = []
+    staging_by_code: dict[str, list[str]] = {}
+    valid_row_count = 0
     for idx, row in df.iterrows():
         code = _cell_str(row.get("code"))
         description = _cell_str(row.get("description"))
         if not code or not description:
             continue
+        valid_row_count += 1
         encargado = _cell_str(row.get("encargado_document"))
         principal = _cell_str(row.get("principal_cc_code"))
-        staging.append([code[:100], description[:70], _csv_cell(encargado), _csv_cell(principal)])
+        staging_by_code[code[:100]] = [
+            code[:100],
+            description[:70],
+            _csv_cell(encargado),
+            _csv_cell(principal),
+        ]
+
+    staging = list(staging_by_code.values())
+    dup_skipped = valid_row_count - len(staging)
+    if dup_skipped > 0:
+        warnings.append(
+            f"Se omitieron {dup_skipped} fila(s) con código duplicado "
+            f"(se conservó la última ocurrencia de cada código)."
+        )
 
     if not staging:
         return {

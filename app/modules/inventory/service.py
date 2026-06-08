@@ -1004,6 +1004,55 @@ def _bump_eti_act(user: User | None, inv_num: str | None) -> None:
         user.eti_act = int(user.eti_act or 0) + 1
 
 
+def _normalize_hoj_num(value: str | None) -> str:
+    s = str(value or "").strip()
+    if s.isdigit():
+        return str(int(s)).zfill(5)
+    return s
+
+
+def _margesi_internal_code(row: m.InvMargesiItem) -> str | None:
+    code = str(row.mar_num or "").strip()
+    if code:
+        return code
+    ex = row.extra if isinstance(row.extra, dict) else {}
+    alt = str(ex.get("codigo_interno") or "").strip()
+    return alt or None
+
+
+def _link_item_to_margesi(
+    card: m.InvCard,
+    ict: m.InvItemCard,
+    marg: m.InvMargesiItem,
+    *,
+    mar_cpat: str | None = None,
+) -> None:
+    """Marca conciliación inventario ↔ margesi (sin modificar ``mar_des`` del catálogo)."""
+    hoj = _normalize_hoj_num(card.hoj_num)
+    card.hoj_num = hoj
+    inv = (ict.inv_num or "").strip()
+    if inv:
+        marg.inv_num = inv
+    marg.inv_hoj = hoj
+    marg.inv_sit = "C"
+    marg.inv_con = "1"
+
+    ict.id_margesi = int(marg.id)
+    ict.inv_sit = "C"
+    ict.inv_con = "1"
+
+    internal = _margesi_internal_code(marg)
+    if internal:
+        ict.mar_num = internal
+
+    cpat = (mar_cpat or ict.mar_cpat or marg.mar_cpat or "").strip()
+    if cpat:
+        ict.mar_cpat = cpat
+
+    if marg.mar_des:
+        ict.mar_des = marg.mar_des
+
+
 def store_card_item(
     db: Session,
     tenant_id: UUID,
@@ -1062,67 +1111,87 @@ def store_card_item(
         ict.inv_num = body.inv_num
         ict.inv_num_1 = body.inv_num_1
         ict.inv_num_2 = body.inv_num_2
-        if body.mar_num is not None:
+        if body.mar_num is not None and not ict.id_margesi:
             ict.mar_num = body.mar_num
-        if body.mar_des is not None:
+        if body.mar_des is not None and not ict.id_margesi:
             ict.mar_des = body.mar_des
-        base = body.mar_cpat if body.mar_cpat is not None else ict.mar_cpat
-        base = base or ""
-        ict.mar_cpat = f"{base}{body.mar_cpat_num or ''}"
+        if not ict.id_margesi:
+            base = body.mar_cpat if body.mar_cpat is not None else ict.mar_cpat
+            base = base or ""
+            ict.mar_cpat = f"{base}{body.mar_cpat_num or ''}"
         ict.extra = {**(ict.extra or {}), **patch_extra}
-        if body.id_margesi:
-            marg = db.get(m.InvMargesiItem, body.id_margesi)
-            if marg and marg.tenant_id == tenant_id and ict.inv_num:
-                marg.inv_num = ict.inv_num
+        if ict.id_margesi:
+            marg = db.get(m.InvMargesiItem, ict.id_margesi)
+            if marg and marg.tenant_id == tenant_id:
+                _link_item_to_margesi(card, ict, marg)
                 db.add(marg)
+        elif body.id_margesi and not body.no_conciliar:
+            marg = db.get(m.InvMargesiItem, body.id_margesi)
+            if marg and marg.tenant_id == tenant_id:
+                mar_cpat_base = body.mar_cpat or marg.mar_cpat or ""
+                _link_item_to_margesi(card, ict, marg, mar_cpat=mar_cpat_base)
+                db.add(marg)
+        elif body.no_conciliar:
+            ict.inv_sit = "S"
+            ict.inv_con = None
+            ict.id_margesi = None
+        elif not ict.id_margesi and not body.id_margesi:
+            ict.inv_sit = "C"
         db.add(ict)
+        db.add(card)
         if operator:
             _bump_eti_act(operator, inv_num)
             db.add(operator)
         db.commit()
         return True, "Item modificado"
 
-    mar_cpat_base = body.mar_cpat or ""
-    inv_sit = "S"
-    inv_con = None
+    mar_cpat_base = (body.mar_cpat or "").strip()
     id_margesi = body.id_margesi
-    if id_margesi:
-        if body.no_conciliar:
-            inv_sit = "S"
-        else:
-            inv_sit = "C"
-            inv_con = "1"
-            mar_cpat_base = f"{mar_cpat_base}{body.mar_cpat_num or ''}"
+    if body.no_conciliar:
+        id_margesi = None
 
-    initial_cpat = mar_cpat_base if (id_margesi and not body.no_conciliar) else (body.mar_cpat or "")
+    marg_row: m.InvMargesiItem | None = None
+    if id_margesi:
+        marg_row = db.get(m.InvMargesiItem, id_margesi)
+        if marg_row is None or marg_row.tenant_id != tenant_id:
+            return False, "Registro Margesi no encontrado"
+        if not mar_cpat_base and marg_row.mar_cpat:
+            mar_cpat_base = str(marg_row.mar_cpat).strip()
+
+    if body.no_conciliar:
+        inv_sit = "S"
+        inv_con = None
+    else:
+        inv_sit = "C"
+        inv_con = "1" if id_margesi else None
+
+    initial_cpat = body.mar_cpat or ""
+    item_des = body.mar_des
+    if id_margesi and marg_row is not None:
+        initial_cpat = mar_cpat_base
+        if marg_row.mar_des:
+            item_des = marg_row.mar_des
 
     ict = m.InvItemCard(
         tenant_id=tenant_id,
         id_card=card_id,
         inv_num=body.inv_num,
         mar_num=body.mar_num,
-        mar_des=body.mar_des,
-        mar_cpat=initial_cpat,
+        mar_des=item_des,
+        mar_cpat=initial_cpat or None,
         inv_sit=inv_sit,
         inv_con=inv_con,
         inv_num_1=body.inv_num_1,
         inv_num_2=body.inv_num_2,
-        id_margesi=id_margesi if id_margesi and not body.no_conciliar else None,
+        id_margesi=id_margesi,
         extra=patch_extra or None,
     )
     db.add(ict)
     db.flush()
 
-    if id_margesi and not body.no_conciliar:
-        marg = db.get(m.InvMargesiItem, id_margesi)
-        if marg and marg.tenant_id == tenant_id:
-            marg.inv_num = ict.inv_num
-            marg.inv_hoj = card.hoj_num
-            marg.inv_sit = "C"
-            marg.inv_con = "1"
-            db.add(marg)
-        ict.id_margesi = id_margesi
-        ict.mar_cpat = mar_cpat_base
+    if id_margesi and marg_row is not None:
+        _link_item_to_margesi(card, ict, marg_row, mar_cpat=mar_cpat_base)
+        db.add(marg_row)
 
     card.hoj_can_tot = int(card.hoj_can_tot or 0) + 1
     db.add(card)
