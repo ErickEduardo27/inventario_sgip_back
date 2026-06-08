@@ -1,12 +1,14 @@
 """Importación masiva de hojas de captura (cabecera ``cards``) desde Excel/CSV.
 
-Fila 1 = encabezado (descartada). Columnas por índice:
-  A hoj_num, B hoj_fec, C código ambiente, D código centro de costo,
-  E documento usuario responsable (opcional), F email inventariador,
-  G email digitador (opcional; si vacío usa el usuario que importa),
-  H nota_interna, I nota_ficha.
+Fila 1 = encabezado (descartada). Columnas por índice (A–G):
+  A Número de hoja, B hoj_fec, C code_ambiente, D code_ccosto,
+  E number_usuario (opcional; vacío o 0 = sin responsable),
+  F number_digitador, G number_inventariador.
 
-Upsert por ``hoj_num`` en el tenant. No modifica ``state``, ``hoj_can_tot`` ni ``flag_firma`` en hojas existentes.
+Los números de digitador/inventariador se resuelven vía ``persons.number`` → ``users.email``.
+Si el digitador no se encuentra, se usa el usuario que ejecuta la importación.
+
+Upsert por ``hoj_num`` en el tenant. No modifica ``state``, ``hoj_can_tot`` ni ``flag_firma``.
 """
 
 from __future__ import annotations
@@ -27,10 +29,8 @@ _IMPORT_FIELD_NAMES = (
     "env_code",
     "cc_code",
     "person_document",
-    "inventariador_email",
-    "digitador_email",
-    "nota_interna",
-    "nota_ficha",
+    "digitador_number",
+    "inventariador_number",
 )
 
 MAX_IMPORT_WARNINGS = 30
@@ -44,6 +44,13 @@ def _cell_str(value: object) -> str:
             return str(int(value))
         return str(value).strip()
     return str(value).strip()
+
+
+def _optional_person_document(value: object) -> str:
+    s = _cell_str(value)
+    if not s or s == "0":
+        return ""
+    return s
 
 
 def _parse_date(value: object) -> str | None:
@@ -113,23 +120,21 @@ def bulk_import_cards(
         hoj_fec = _parse_date(row.get("hoj_fec"))
         env_code = _cell_str(row.get("env_code"))
         cc_code = _cell_str(row.get("cc_code"))
-        inv_email = _cell_str(row.get("inventariador_email")).lower()
-        if not hoj_num or not hoj_fec or not env_code or not cc_code or not inv_email:
+        inv_number = _cell_str(row.get("inventariador_number"))
+        if not hoj_num or not hoj_fec or not env_code or not cc_code or not inv_number:
             skipped_invalid += 1
             continue
         valid_row_count += 1
-        person_doc = _cell_str(row.get("person_document"))
-        dig_email = _cell_str(row.get("digitador_email")).lower()
+        person_doc = _optional_person_document(row.get("person_document"))
+        dig_number = _cell_str(row.get("digitador_number"))
         staging_by_hoj[hoj_num[:50]] = [
             hoj_num[:50],
             hoj_fec,
             env_code[:100],
             cc_code[:100],
             _csv_cell(person_doc),
-            inv_email[:200],
-            _csv_cell(dig_email),
-            _csv_cell(_cell_str(row.get("nota_interna"))),
-            _csv_cell(_cell_str(row.get("nota_ficha"))),
+            _csv_cell(dig_number),
+            inv_number[:50],
         ]
 
     staging = list(staging_by_hoj.values())
@@ -142,7 +147,7 @@ def bulk_import_cards(
     if skipped_invalid > 0:
         warnings.append(
             f"Se omitieron {skipped_invalid} fila(s) sin N° hoja, fecha, ambiente, "
-            f"centro de costo o email de inventariador."
+            f"centro de costo o número de inventariador."
         )
 
     if not staging:
@@ -153,7 +158,7 @@ def bulk_import_cards(
             "registered": 0,
             "inserted": 0,
             "updated": 0,
-            "errors": warnings or ["Revise columnas obligatorias A–F"],
+            "errors": warnings or ["Revise columnas obligatorias A–D y G"],
         }
 
     tenant_s = str(tenant_id)
@@ -171,10 +176,8 @@ def bulk_import_cards(
                     env_code VARCHAR(100) NOT NULL,
                     cc_code VARCHAR(100) NOT NULL,
                     person_document VARCHAR(50),
-                    inventariador_email VARCHAR(200) NOT NULL,
-                    digitador_email VARCHAR(200),
-                    nota_interna TEXT,
-                    nota_ficha TEXT
+                    digitador_number VARCHAR(50),
+                    inventariador_number VARCHAR(50) NOT NULL
                 ) ON COMMIT DROP
             """,
             columns=(
@@ -183,10 +186,8 @@ def bulk_import_cards(
                 "env_code",
                 "cc_code",
                 "person_document",
-                "inventariador_email",
-                "digitador_email",
-                "nota_interna",
-                "nota_ficha",
+                "digitador_number",
+                "inventariador_number",
             ),
             rows=staging,
         )
@@ -201,8 +202,8 @@ def bulk_import_cards(
                     env.id AS id_ambiente,
                     cc.id AS id_ccosto,
                     p.id AS id_usuario,
-                    inv.id AS id_inventariador,
-                    COALESCE(dig.id, NULLIF(%s, '')::uuid, inv.id) AS id_digitador
+                    inv_u.id AS id_inventariador,
+                    COALESCE(dig_u.id, NULLIF(%s, '')::uuid, inv_u.id) AS id_digitador
                 FROM tmp_cards_import t
                 INNER JOIN enviroments env
                     ON env.tenant_id = %s::uuid
@@ -210,13 +211,22 @@ def bulk_import_cards(
                 INNER JOIN cost_center cc
                     ON cc.tenant_id = %s::uuid
                    AND cc.code = t.cc_code
-                INNER JOIN users inv
-                    ON inv.tenant_id = %s::uuid
-                   AND lower(inv.email) = t.inventariador_email
-                LEFT JOIN users dig
-                    ON dig.tenant_id = %s::uuid
-                   AND NULLIF(t.digitador_email, '') IS NOT NULL
-                   AND lower(dig.email) = t.digitador_email
+                INNER JOIN persons p_inv
+                    ON p_inv.tenant_id = %s::uuid
+                   AND (
+                        p_inv.number = t.inventariador_number
+                        OR ltrim(p_inv.number, '0') = ltrim(t.inventariador_number, '0')
+                   )
+                INNER JOIN users inv_u
+                    ON inv_u.tenant_id = %s::uuid
+                   AND inv_u.is_deleted = false
+                   AND (
+                        (
+                            NULLIF(p_inv.email, '') IS NOT NULL
+                            AND lower(inv_u.email) = lower(p_inv.email)
+                        )
+                        OR inv_u.full_name = p_inv.name
+                   )
                 LEFT JOIN persons p
                     ON p.tenant_id = %s::uuid
                    AND NULLIF(t.person_document, '') IS NOT NULL
@@ -224,11 +234,29 @@ def bulk_import_cards(
                         p.number = t.person_document
                         OR ltrim(p.number, '0') = ltrim(t.person_document, '0')
                    )
+                LEFT JOIN persons p_dig
+                    ON p_dig.tenant_id = %s::uuid
+                   AND NULLIF(t.digitador_number, '') IS NOT NULL
+                   AND (
+                        p_dig.number = t.digitador_number
+                        OR ltrim(p_dig.number, '0') = ltrim(t.digitador_number, '0')
+                   )
+                LEFT JOIN users dig_u
+                    ON dig_u.tenant_id = %s::uuid
+                   AND dig_u.is_deleted = false
+                   AND p_dig.id IS NOT NULL
+                   AND (
+                        (
+                            NULLIF(p_dig.email, '') IS NOT NULL
+                            AND lower(dig_u.email) = lower(p_dig.email)
+                        )
+                        OR dig_u.full_name = p_dig.name
+                   )
             ),
             upsert AS (
                 INSERT INTO cards (
                     tenant_id, hoj_num, hoj_fec, id_ambiente, id_ccosto, id_usuario,
-                    id_inventariador, id_digitador, nota_interna, nota_ficha,
+                    id_inventariador, id_digitador,
                     state, hoj_can_tot, flag_firma
                 )
                 SELECT
@@ -240,8 +268,6 @@ def bulk_import_cards(
                     r.id_usuario,
                     r.id_inventariador,
                     r.id_digitador,
-                    NULLIF(r.nota_interna, ''),
-                    NULLIF(r.nota_ficha, ''),
                     1,
                     0,
                     false
@@ -253,8 +279,6 @@ def bulk_import_cards(
                     id_usuario = EXCLUDED.id_usuario,
                     id_inventariador = EXCLUDED.id_inventariador,
                     id_digitador = EXCLUDED.id_digitador,
-                    nota_interna = EXCLUDED.nota_interna,
-                    nota_ficha = EXCLUDED.nota_ficha,
                     updated_at = NOW()
                 RETURNING (xmax = 0) AS inserted
             )
@@ -266,6 +290,8 @@ def bulk_import_cards(
             """,
             (
                 operator_s,
+                tenant_s,
+                tenant_s,
                 tenant_s,
                 tenant_s,
                 tenant_s,
@@ -284,17 +310,32 @@ def bulk_import_cards(
               ON env.tenant_id = %s::uuid AND env.code = t.env_code
             LEFT JOIN cost_center cc
               ON cc.tenant_id = %s::uuid AND cc.code = t.cc_code
-            LEFT JOIN users inv
-              ON inv.tenant_id = %s::uuid AND lower(inv.email) = t.inventariador_email
-            WHERE env.id IS NULL OR cc.id IS NULL OR inv.id IS NULL
+            LEFT JOIN persons p_inv
+              ON p_inv.tenant_id = %s::uuid
+             AND (
+                  p_inv.number = t.inventariador_number
+                  OR ltrim(p_inv.number, '0') = ltrim(t.inventariador_number, '0')
+             )
+            LEFT JOIN users inv_u
+              ON inv_u.tenant_id = %s::uuid
+             AND inv_u.is_deleted = false
+             AND p_inv.id IS NOT NULL
+             AND (
+                  (
+                      NULLIF(p_inv.email, '') IS NOT NULL
+                      AND lower(inv_u.email) = lower(p_inv.email)
+                  )
+                  OR inv_u.full_name = p_inv.name
+             )
+            WHERE env.id IS NULL OR cc.id IS NULL OR inv_u.id IS NULL
             """,
-            (tenant_s, tenant_s, tenant_s),
+            (tenant_s, tenant_s, tenant_s, tenant_s),
         )
         unresolved = int(cur.fetchone()[0] or 0)
         if unresolved > 0:
             msg = (
                 f"{unresolved} fila(s) no importada(s): ambiente, centro de costo "
-                f"o inventariador no encontrado(s)."
+                f"o inventariador (persona/usuario) no encontrado(s)."
             )
             if len(warnings) < MAX_IMPORT_WARNINGS:
                 warnings.append(msg)

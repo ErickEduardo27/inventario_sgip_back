@@ -86,7 +86,9 @@ def bulk_import_environments(
     progress_cb=None,
 ) -> dict[str, Any]:
     df, total_in_file = parse_environment_data_rows(content, filename)
-    staging: list[list[str]] = []
+    warnings: list[str] = []
+    staging_by_code: dict[str, list[str]] = {}
+    valid_row_count = 0
     for _, row in df.iterrows():
         code = _cell_str(row.get("code"))
         if not code:
@@ -94,16 +96,23 @@ def bulk_import_environments(
         local_code = _cell_str(row.get("establishment_code"))
         if not local_code:
             continue
-        staging.append(
-            [
-                code[:100],
-                _csv_cell(_nullable_str(row.get("description"))),
-                local_code[:100],
-                _csv_cell(_nullable_str(row.get("floor"))),
-                _csv_cell(_nullable_str(row.get("observation"))),
-                _csv_cell(_nullable_str(row.get("telephone"))),
-                _csv_cell(_nullable_str(row.get("anex"))),
-            ]
+        valid_row_count += 1
+        staging_by_code[code[:100]] = [
+            code[:100],
+            _csv_cell(_nullable_str(row.get("description"))),
+            local_code[:100],
+            _csv_cell(_nullable_str(row.get("floor"))),
+            _csv_cell(_nullable_str(row.get("observation"))),
+            _csv_cell(_nullable_str(row.get("telephone"))),
+            _csv_cell(_nullable_str(row.get("anex"))),
+        ]
+
+    staging = list(staging_by_code.values())
+    dup_skipped = valid_row_count - len(staging)
+    if dup_skipped > 0:
+        warnings.append(
+            f"Se omitieron {dup_skipped} fila(s) con código de ambiente duplicado "
+            f"(se conservó la última ocurrencia de cada código)."
         )
 
     if not staging:
@@ -200,6 +209,7 @@ def bulk_import_environments(
             "registered": int(registered),
             "inserted": int(inserted),
             "updated": int(updated),
+            "errors": warnings,
         }
     except Exception as exc:  # noqa: BLE001
         db.rollback()
