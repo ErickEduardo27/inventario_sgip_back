@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user, get_db, get_tenant_id
+from app.modules.iam.dependencies import require_permission
 from app.modules.iam.models import User
 from app.modules.inventory import conciliation as conc
 from app.modules.inventory import cost_center_import as cc_import
@@ -17,10 +18,13 @@ from app.modules.inventory import margesi_import as margesi_import_mod
 from app.modules.inventory import person_import as person_import_mod
 from app.modules.inventory import environment_import as env_import
 from app.modules.inventory import establishment_import as est_import
+from app.modules.inventory import hoja_captura_import as hoja_captura_import_mod
 from app.modules.inventory import import_common as imp_common
 from app.modules.inventory import geo_catalog as geo
 from app.modules.inventory import models as inv_models
 from app.modules.inventory import service as inv
+from app.modules.inventory.csv_export import csv_download_response
+from app.modules.inventory.export_queries import get_export_query
 from app.modules.inventory.schemas import (
     CardItemWrite,
     CardWrite,
@@ -38,6 +42,7 @@ from app.modules.inventory.schemas import (
     EstablishmentImportResult,
     ImportJobStatus,
     HojaCapturaTablesResponse,
+    HojaCapturaImportResult,
     ImportConciliationMatchRequest,
     ImportConciliationResult,
     ImportConciliationRow,
@@ -66,11 +71,34 @@ from app.modules.inventory.schemas import (
 router = APIRouter(prefix="/inventory", tags=["inventory"])
 
 
+def _csv_export_route(module: str, permission_code: str):
+    def _endpoint(
+        db: Session = Depends(get_db),
+        tenant_id: UUID = Depends(get_tenant_id),
+        _: User = Depends(require_permission(permission_code, "export")),
+    ):
+        try:
+            inner_sql, filename_base = get_export_query(module)
+            return csv_download_response(
+                db,
+                tenant_id=tenant_id,
+                inner_sql=inner_sql,
+                filename_base=filename_base,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=500, detail=f"Error al exportar CSV: {exc}") from exc
+
+    return _endpoint
+
+
 def _q(
     page: int = Query(1, ge=1),
     per_page: int = Query(15, ge=1, le=2000),
     column: str = Query("code"),
     value: str | None = Query(None),
+    search: str | None = Query(None, description="Búsqueda en campos principales del módulo"),
     column_ord: str | None = Query(None, alias="columnOrd"),
     ord_tipo: str = Query("asc", alias="ordTipo"),
 ) -> RecordQuery:
@@ -79,6 +107,7 @@ def _q(
         per_page=per_page,
         column=column,
         value=value,
+        search=search,
         column_ord=column_ord,
         ord_tipo=ord_tipo,
     )
@@ -159,6 +188,14 @@ def establishments_records(
     return PagedRows(data=rows, meta=PagedMeta(**inv.paged_meta(total, q.page, q.per_page)))
 
 
+router.add_api_route(
+    "/establishments/export",
+    _csv_export_route("establishments", "locales"),
+    methods=["GET"],
+    tags=["inventory"],
+)
+
+
 @router.get("/establishments/{row_id}")
 def establishment_get(row_id: int, db: Session = Depends(get_db), tenant_id: UUID = Depends(get_tenant_id)):
     from app.modules.inventory import models as m
@@ -203,7 +240,7 @@ async def establishments_import(
         content=content,
         filename=filename,
         tenant_id=tenant_id,
-        module="establishments",
+        module=imp_common.IMPORT_MODULE_ESTABLISHMENTS,
         row_count=int(len(df)),
         celery_task=import_establishments_task,
         created_by_id=user.id,
@@ -269,6 +306,14 @@ def persons_records(db: Session = Depends(get_db), tenant_id: UUID = Depends(get
     return PagedRows(data=rows, meta=PagedMeta(**inv.paged_meta(total, q.page, q.per_page)))
 
 
+router.add_api_route(
+    "/persons/export",
+    _csv_export_route("persons", "personas"),
+    methods=["GET"],
+    tags=["inventory"],
+)
+
+
 @router.get("/persons/{row_id}")
 def person_get(row_id: int, db: Session = Depends(get_db), tenant_id: UUID = Depends(get_tenant_id)):
     from app.modules.inventory import models as m
@@ -314,7 +359,7 @@ async def persons_import(
         content=content,
         filename=filename,
         tenant_id=tenant_id,
-        module="persons",
+        module=imp_common.IMPORT_MODULE_PERSONS,
         row_count=int(len(df)),
         celery_task=import_persons_task,
         celery_args=(type,),
@@ -336,6 +381,14 @@ def cost_centers_records(
     allowed = {"code", "description"}
     rows, total = inv.list_cost_centers(db, tenant_id, q, allowed)
     return PagedRows(data=rows, meta=PagedMeta(**inv.paged_meta(total, q.page, q.per_page)))
+
+
+router.add_api_route(
+    "/cost-centers/export",
+    _csv_export_route("cost_centers", "centro_costo"),
+    methods=["GET"],
+    tags=["inventory"],
+)
 
 
 @router.get("/cost-centers/{row_id}")
@@ -382,7 +435,7 @@ async def cost_centers_import(
         content=content,
         filename=filename,
         tenant_id=tenant_id,
-        module="cost_centers",
+        module=imp_common.IMPORT_MODULE_COST_CENTERS,
         row_count=int(len(df)),
         celery_task=import_cost_centers_task,
         created_by_id=user.id,
@@ -410,6 +463,14 @@ def environments_records(
     allowed = {"code", "description", "floor", "telephone"}
     rows, total = inv.list_environments(db, tenant_id, q, allowed)
     return PagedRows(data=rows, meta=PagedMeta(**inv.paged_meta(total, q.page, q.per_page)))
+
+
+router.add_api_route(
+    "/environments/export",
+    _csv_export_route("environments", "ambientes"),
+    methods=["GET"],
+    tags=["inventory"],
+)
 
 
 @router.get("/environments/{row_id}")
@@ -456,7 +517,7 @@ async def environments_import(
         content=content,
         filename=filename,
         tenant_id=tenant_id,
-        module="environments",
+        module=imp_common.IMPORT_MODULE_ENVIRONMENTS,
         row_count=int(len(df)),
         celery_task=import_environments_task,
         created_by_id=user.id,
@@ -482,6 +543,14 @@ def cards_records(db: Session = Depends(get_db), tenant_id: UUID = Depends(get_t
     allowed = {"hoj_num", "state", "nota_interna"}
     rows, total = inv.list_cards(db, tenant_id, q, allowed)
     return PagedRows(data=rows, meta=PagedMeta(**inv.paged_meta(total, q.page, q.per_page)))
+
+
+router.add_api_route(
+    "/hoja-captura/export",
+    _csv_export_route("cards", "hoja_captura"),
+    methods=["GET"],
+    tags=["inventory"],
+)
 
 
 @router.get("/cards/{row_id}")
@@ -554,6 +623,36 @@ def hoja_captura_tables(
     user: User = Depends(get_current_user),
 ):
     return inv.hoja_captura_tables(db, tenant_id, user.id)
+
+
+@router.post("/hoja-captura/import", response_model=HojaCapturaImportResult)
+async def hoja_captura_import(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    tenant_id: UUID = Depends(get_tenant_id),
+    user: User = Depends(get_current_user),
+):
+    try:
+        content, filename = await imp_common.read_upload_bytes(file)
+        df, _ = hoja_captura_import_mod.parse_hoja_captura_item_rows(content, filename)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    from app.tasks.bulk_imports import import_hoja_captura_task
+
+    result = imp_common.dispatch_import_job(
+        db=db,
+        content=content,
+        filename=filename,
+        tenant_id=tenant_id,
+        module=imp_common.IMPORT_MODULE_HOJA_CAPTURA,
+        row_count=int(len(df)),
+        celery_task=import_hoja_captura_task,
+        created_by_id=user.id,
+    )
+    if not result.get("success") and result.get("errors"):
+        raise HTTPException(status_code=400, detail=result["errors"][0])
+    return HojaCapturaImportResult(**result)
 
 
 @router.get("/hoja-captura/tables/user", response_model=UserInventoryConf)
@@ -754,6 +853,14 @@ def list_sbn_records(db: Session = Depends(get_db), tenant_id: UUID = Depends(ge
     return PagedRows(data=rows, meta=PagedMeta(**inv.paged_meta(total, q.page, q.per_page)))
 
 
+router.add_api_route(
+    "/list-sbn/export",
+    _csv_export_route("list_sbn", "list_sbn"),
+    methods=["GET"],
+    tags=["inventory"],
+)
+
+
 @router.get("/list-sbn/{row_id}")
 def list_sbn_get(row_id: int, db: Session = Depends(get_db), tenant_id: UUID = Depends(get_tenant_id)):
     from app.modules.inventory import models as m
@@ -798,7 +905,7 @@ async def list_sbn_import(
         content=content,
         filename=filename,
         tenant_id=tenant_id,
-        module="list_sbn",
+        module=imp_common.IMPORT_MODULE_LIST_SBN,
         row_count=int(len(df)),
         celery_task=import_list_sbn_task,
         created_by_id=user.id,
@@ -816,6 +923,14 @@ def margesi_records(db: Session = Depends(get_db), tenant_id: UUID = Depends(get
     allowed = {"inv_num", "mar_cpat", "mar_des", "inv_sit", "mar_num", "mar_mar", "mar_mod"}
     rows, total = inv.list_margesi(db, tenant_id, q, allowed)
     return PagedRows(data=rows, meta=PagedMeta(**inv.paged_meta(total, q.page, q.per_page)))
+
+
+router.add_api_route(
+    "/margesi/export",
+    _csv_export_route("margesi", "margesi"),
+    methods=["GET"],
+    tags=["inventory"],
+)
 
 
 @router.get("/margesi/{row_id}")
@@ -863,7 +978,7 @@ async def margesi_import(
         content=content,
         filename=filename,
         tenant_id=tenant_id,
-        module="margesi",
+        module=imp_common.IMPORT_MODULE_MARGESI,
         row_count=int(len(df)),
         celery_task=import_margesi_task,
         created_by_id=user.id,
@@ -893,7 +1008,7 @@ async def margesi_import_moment(
         content=content,
         filename=filename,
         tenant_id=tenant_id,
-        module="margesi_moment",
+        module=imp_common.IMPORT_MODULE_MARGESI_MOMENT,
         row_count=int(len(df)),
         celery_task=import_margesi_moment_task,
         created_by_id=user.id,

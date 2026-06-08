@@ -224,6 +224,7 @@ class RecordQuery(BaseModel):
     per_page: int = Field(default=15, ge=1, le=2000)
     column: str = "code"
     value: str | None = None
+    search: str | None = None
     column_ord: str | None = None
     ord_tipo: str = "asc"
 
@@ -405,6 +406,18 @@ class MargesiImportResult(BaseModel):
     message: str
     total: int = 0
     registered: int = 0
+    errors: list[str] = Field(default_factory=list)
+    async_job: bool = False
+    job_id: str | None = None
+
+
+class HojaCapturaImportResult(BaseModel):
+    success: bool
+    message: str
+    total: int = 0
+    registered: int = 0
+    inserted: int = 0
+    updated: int = 0
     errors: list[str] = Field(default_factory=list)
     async_job: bool = False
     job_id: str | None = None

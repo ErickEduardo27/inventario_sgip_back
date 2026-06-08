@@ -47,6 +47,13 @@ def _paged(session: Session, stmt, page: int, per_page: int) -> tuple[list[Any],
     return list(rows), int(total)
 
 
+def _search_like(q: RecordQuery) -> str | None:
+    term = (q.search or "").strip()
+    if term:
+        return f"%{term}%"
+    return None
+
+
 def row_to_dict(obj: Any) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for k in obj.__mapper__.c.keys():
@@ -204,7 +211,18 @@ def upsert_establishment(db: Session, tenant_id: UUID, body: EstablishmentWrite)
 def list_establishments(db: Session, tenant_id: UUID, q: RecordQuery, allowed_cols: set[str]) -> tuple[list[dict], int]:
     col = q.column if q.column in allowed_cols else "code"
     stmt = select(m.InvEstablishment).where(m.InvEstablishment.tenant_id == tenant_id)
-    if q.value not in (None, ""):
+    pattern = _search_like(q)
+    if pattern is not None:
+        stmt = stmt.where(
+            or_(
+                m.InvEstablishment.code.ilike(pattern),
+                m.InvEstablishment.description.ilike(pattern),
+                m.InvEstablishment.address.ilike(pattern),
+                m.InvEstablishment.email.ilike(pattern),
+                m.InvEstablishment.telephone.ilike(pattern),
+            )
+        )
+    elif q.value not in (None, ""):
         stmt = stmt.where(getattr(m.InvEstablishment, col).ilike(f"%{q.value}%"))
     order_col = q.column_ord or col
     if order_col not in allowed_cols | {"id", "created_at"}:
@@ -239,7 +257,25 @@ def upsert_person(db: Session, tenant_id: UUID, body: PersonWrite) -> m.InvPerso
 def list_persons(db: Session, tenant_id: UUID, q: RecordQuery, allowed_cols: set[str]) -> tuple[list[dict], int]:
     col = q.column if q.column in allowed_cols else "name"
     stmt = select(m.InvPerson).where(m.InvPerson.tenant_id == tenant_id)
-    if q.value not in (None, ""):
+    pattern = _search_like(q)
+    if pattern is not None:
+        extra = m.InvPerson.extra
+        stmt = stmt.where(
+            or_(
+                m.InvPerson.name.ilike(pattern),
+                m.InvPerson.number.ilike(pattern),
+                m.InvPerson.email.ilike(pattern),
+                m.InvPerson.telephone.ilike(pattern),
+                m.InvPerson.enviroment_code.ilike(pattern),
+                m.InvPerson.cc_code.ilike(pattern),
+                m.InvPerson.type.ilike(pattern),
+                extra["codigo_interno"].astext.ilike(pattern),
+                extra["nombre"].astext.ilike(pattern),
+                extra["apellido_paterno"].astext.ilike(pattern),
+                extra["apellido_materno"].astext.ilike(pattern),
+            )
+        )
+    elif q.value not in (None, ""):
         stmt = stmt.where(getattr(m.InvPerson, col).ilike(f"%{q.value}%"))
     order_col = q.column_ord or col
     if order_col not in allowed_cols | {"id", "created_at"}:
@@ -391,7 +427,22 @@ def delete_cost_center(db: Session, tenant_id: UUID, cc_id: int) -> tuple[bool, 
 def list_cost_centers(db: Session, tenant_id: UUID, q: RecordQuery, allowed_cols: set[str]) -> tuple[list[dict], int]:
     col = q.column if q.column in allowed_cols else "code"
     stmt = select(m.InvCostCenter).where(m.InvCostCenter.tenant_id == tenant_id)
-    if q.value not in (None, ""):
+    pattern = _search_like(q)
+    if pattern is not None:
+        enc = m.InvPerson
+        stmt = (
+            stmt.outerjoin(enc, (enc.id == m.InvCostCenter.personal_id) & (enc.tenant_id == m.InvCostCenter.tenant_id))
+            .where(
+                or_(
+                    m.InvCostCenter.code.ilike(pattern),
+                    m.InvCostCenter.description.ilike(pattern),
+                    enc.number.ilike(pattern),
+                    enc.name.ilike(pattern),
+                )
+            )
+            .distinct()
+        )
+    elif q.value not in (None, ""):
         stmt = stmt.where(getattr(m.InvCostCenter, col).ilike(f"%{q.value}%"))
     order_col = q.column_ord or col
     if order_col not in allowed_cols | {"id", "created_at"}:
@@ -470,7 +521,27 @@ def list_environments(
         order_col = "code"
     stmt = select(m.InvEnvironment).where(m.InvEnvironment.tenant_id == tenant_id)
 
-    if q.column == "local" and q.value not in (None, ""):
+    pattern = _search_like(q)
+    if pattern is not None:
+        est = m.InvEstablishment
+        stmt = (
+            stmt.outerjoin(
+                est,
+                (est.id == m.InvEnvironment.establishment_id) & (est.tenant_id == m.InvEnvironment.tenant_id),
+            )
+            .where(
+                or_(
+                    m.InvEnvironment.code.ilike(pattern),
+                    m.InvEnvironment.description.ilike(pattern),
+                    m.InvEnvironment.floor.ilike(pattern),
+                    m.InvEnvironment.telephone.ilike(pattern),
+                    est.code.ilike(pattern),
+                    est.description.ilike(pattern),
+                )
+            )
+            .distinct()
+        )
+    elif q.column == "local" and q.value not in (None, ""):
         sub = select(m.InvEstablishment.id).where(
             m.InvEstablishment.tenant_id == tenant_id,
             m.InvEstablishment.description.ilike(f"%{q.value}%"),
@@ -755,7 +826,27 @@ def upsert_card(
 def list_cards(db: Session, tenant_id: UUID, q: RecordQuery, allowed_cols: set[str]) -> tuple[list[dict], int]:
     col = q.column if q.column in allowed_cols else "hoj_num"
     stmt = select(m.InvCard).where(m.InvCard.tenant_id == tenant_id)
-    if q.value not in (None, ""):
+    pattern = _search_like(q)
+    if pattern is not None:
+        env = m.InvEnvironment
+        cc = m.InvCostCenter
+        stmt = (
+            stmt.outerjoin(env, (env.id == m.InvCard.id_ambiente) & (env.tenant_id == m.InvCard.tenant_id))
+            .outerjoin(cc, (cc.id == m.InvCard.id_ccosto) & (cc.tenant_id == m.InvCard.tenant_id))
+            .where(
+                or_(
+                    m.InvCard.hoj_num.ilike(pattern),
+                    m.InvCard.nota_interna.ilike(pattern),
+                    m.InvCard.nota_ficha.ilike(pattern),
+                    env.code.ilike(pattern),
+                    env.description.ilike(pattern),
+                    cc.code.ilike(pattern),
+                    cc.description.ilike(pattern),
+                )
+            )
+            .distinct()
+        )
+    elif q.value not in (None, ""):
         stmt = stmt.where(getattr(m.InvCard, col).ilike(f"%{q.value}%"))
     order_col = q.column_ord or "hoj_num"
     if order_col not in allowed_cols | {"id", "created_at"}:
@@ -846,6 +937,8 @@ def close_card(db: Session, tenant_id: UUID, card_id: int) -> tuple[bool, str]:
     row = db.get(m.InvCard, card_id)
     if not row or row.tenant_id != tenant_id:
         return False, "Hoja no encontrada"
+    if not row.flag_firma:
+        return False, "Debe marcar el flag de firma antes de cerrar la hoja"
     num = str(row.hoj_num).zfill(5)
     row.hoj_num = num
     row.pdf = f"HC-{num}.pdf"
@@ -1178,7 +1271,17 @@ def upsert_list_sbn(db: Session, tenant_id: UUID, body: ListSbnWrite) -> m.InvLi
 def list_list_sbn(db: Session, tenant_id: UUID, q: RecordQuery, allowed_cols: set[str]) -> tuple[list[dict], int]:
     col = q.column if q.column in allowed_cols else "code"
     stmt = select(m.InvListSbn).where(m.InvListSbn.tenant_id == tenant_id)
-    if q.value not in (None, ""):
+    pattern = _search_like(q)
+    if pattern is not None:
+        stmt = stmt.where(
+            or_(
+                m.InvListSbn.code.ilike(pattern),
+                m.InvListSbn.cat_des.ilike(pattern),
+                m.InvListSbn.cat_clase.ilike(pattern),
+                m.InvListSbn.cat_cat.ilike(pattern),
+            )
+        )
+    elif q.value not in (None, ""):
         stmt = stmt.where(getattr(m.InvListSbn, col).ilike(f"%{q.value}%"))
     order_col = q.column_ord or "code"
     if order_col not in allowed_cols | {"id", "created_at"}:
@@ -1236,7 +1339,20 @@ def upsert_margesi(db: Session, tenant_id: UUID, body: MargesiWrite) -> m.InvMar
 def list_margesi(db: Session, tenant_id: UUID, q: RecordQuery, allowed_cols: set[str]) -> tuple[list[dict], int]:
     col = q.column if q.column in allowed_cols else "mar_cpat"
     stmt = select(m.InvMargesiItem).where(m.InvMargesiItem.tenant_id == tenant_id)
-    if q.value not in (None, ""):
+    pattern = _search_like(q)
+    if pattern is not None:
+        stmt = stmt.where(
+            or_(
+                m.InvMargesiItem.inv_num.ilike(pattern),
+                m.InvMargesiItem.mar_cpat.ilike(pattern),
+                m.InvMargesiItem.mar_des.ilike(pattern),
+                m.InvMargesiItem.mar_num.ilike(pattern),
+                m.InvMargesiItem.mar_mar.ilike(pattern),
+                m.InvMargesiItem.mar_mod.ilike(pattern),
+                m.InvMargesiItem.inv_hoj.ilike(pattern),
+            )
+        )
+    elif q.value not in (None, ""):
         stmt = stmt.where(getattr(m.InvMargesiItem, col).ilike(f"%{q.value}%"))
     order_col = q.column_ord or "id"
     if order_col not in allowed_cols | {"id", "created_at"}:

@@ -12,6 +12,7 @@ from app.modules.inventory import (
     cost_center_import,
     environment_import,
     establishment_import,
+    hoja_captura_import,
     import_jobs_service as jobs_svc,
     list_sbn_import,
     margesi_import,
@@ -50,6 +51,7 @@ def _run_gcs_import(
     filename: str,
     processor: Callable[..., dict[str, Any]],
     extra_kwargs: dict[str, Any] | None = None,
+    pass_operator_id: bool = False,
 ) -> dict[str, Any]:
     extra_kwargs = extra_kwargs or {}
     job_uuid = UUID(job_id)
@@ -105,13 +107,17 @@ def _run_gcs_import(
             def progress_cb(percent: int, total: int, updated: int, inserted: int) -> None:
                 _persist_job_progress(_progress_meta(percent, total, updated, inserted))
 
+            proc_kwargs = dict(extra_kwargs or {})
+            if pass_operator_id and job.created_by_id is not None:
+                proc_kwargs["operator_id"] = job.created_by_id
+
             result = processor(
                 db,
                 tenant_uuid,
                 content,
                 filename,
                 progress_cb=progress_cb,
-                **extra_kwargs,
+                **proc_kwargs,
             )
 
             job = jobs_svc.get_import_job(db, job_uuid, tenant_uuid)
@@ -223,4 +229,17 @@ def import_margesi_moment_task(self, job_id: str, tenant_id: str, gcs_path: str,
         gcs_path=gcs_path,
         filename=filename,
         processor=margesi_import.process_margesi_moment_upload,
+    )
+
+
+@celery_app.task(bind=True, name="imports.hoja_captura")
+def import_hoja_captura_task(self, job_id: str, tenant_id: str, gcs_path: str, filename: str) -> dict:
+    return _run_gcs_import(
+        self,
+        job_id=job_id,
+        tenant_id=tenant_id,
+        gcs_path=gcs_path,
+        filename=filename,
+        processor=hoja_captura_import.process_hoja_captura_upload,
+        pass_operator_id=True,
     )

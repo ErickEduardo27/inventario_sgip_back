@@ -13,6 +13,16 @@ from sqlalchemy.orm import Session
 from app.core.import_storage import upload_import_file
 from app.modules.inventory import import_jobs_service as jobs_svc
 
+# Módulos con importación masiva vía GCS + import_jobs + Celery.
+IMPORT_MODULE_ESTABLISHMENTS = "establishments"
+IMPORT_MODULE_PERSONS = "persons"
+IMPORT_MODULE_COST_CENTERS = "cost_centers"
+IMPORT_MODULE_ENVIRONMENTS = "environments"
+IMPORT_MODULE_LIST_SBN = "list_sbn"
+IMPORT_MODULE_MARGESI = "margesi"
+IMPORT_MODULE_MARGESI_MOMENT = "margesi_moment"
+IMPORT_MODULE_HOJA_CAPTURA = "hoja_captura"
+
 # Las importaciones masivas siempre se encolan en Celery (background).
 ASYNC_IMPORT_THRESHOLD = 0
 
