@@ -22,6 +22,7 @@ IMPORT_MODULE_LIST_SBN = "list_sbn"
 IMPORT_MODULE_MARGESI = "margesi"
 IMPORT_MODULE_MARGESI_MOMENT = "margesi_moment"
 IMPORT_MODULE_HOJA_CAPTURA = "hoja_captura"
+IMPORT_MODULE_CARDS = "cards"
 
 # Las importaciones masivas siempre se encolan en Celery (background).
 ASYNC_IMPORT_THRESHOLD = 0

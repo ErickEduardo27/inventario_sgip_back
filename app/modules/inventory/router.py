@@ -18,6 +18,7 @@ from app.modules.inventory import margesi_import as margesi_import_mod
 from app.modules.inventory import person_import as person_import_mod
 from app.modules.inventory import environment_import as env_import
 from app.modules.inventory import establishment_import as est_import
+from app.modules.inventory import cards_import as cards_import_mod
 from app.modules.inventory import hoja_captura_import as hoja_captura_import_mod
 from app.modules.inventory import import_common as imp_common
 from app.modules.inventory import geo_catalog as geo
@@ -648,6 +649,36 @@ async def hoja_captura_import(
         module=imp_common.IMPORT_MODULE_HOJA_CAPTURA,
         row_count=int(len(df)),
         celery_task=import_hoja_captura_task,
+        created_by_id=user.id,
+    )
+    if not result.get("success") and result.get("errors"):
+        raise HTTPException(status_code=400, detail=result["errors"][0])
+    return HojaCapturaImportResult(**result)
+
+
+@router.post("/hoja-captura/cards/import", response_model=HojaCapturaImportResult)
+async def hoja_captura_cards_import(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    tenant_id: UUID = Depends(get_tenant_id),
+    user: User = Depends(get_current_user),
+):
+    try:
+        content, filename = await imp_common.read_upload_bytes(file)
+        df, _ = cards_import_mod.parse_cards_data_rows(content, filename)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    from app.tasks.bulk_imports import import_cards_task
+
+    result = imp_common.dispatch_import_job(
+        db=db,
+        content=content,
+        filename=filename,
+        tenant_id=tenant_id,
+        module=imp_common.IMPORT_MODULE_CARDS,
+        row_count=int(len(df)),
+        celery_task=import_cards_task,
         created_by_id=user.id,
     )
     if not result.get("success") and result.get("errors"):

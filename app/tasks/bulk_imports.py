@@ -9,6 +9,7 @@ from app.celery_app import celery_app
 from app.core.import_storage import delete_import_file, download_import_file
 from app.db.session import SessionLocal
 from app.modules.inventory import (
+    cards_import,
     cost_center_import,
     environment_import,
     establishment_import,
@@ -241,5 +242,18 @@ def import_hoja_captura_task(self, job_id: str, tenant_id: str, gcs_path: str, f
         gcs_path=gcs_path,
         filename=filename,
         processor=hoja_captura_import.process_hoja_captura_upload,
+        pass_operator_id=True,
+    )
+
+
+@celery_app.task(bind=True, name="imports.cards")
+def import_cards_task(self, job_id: str, tenant_id: str, gcs_path: str, filename: str) -> dict:
+    return _run_gcs_import(
+        self,
+        job_id=job_id,
+        tenant_id=tenant_id,
+        gcs_path=gcs_path,
+        filename=filename,
+        processor=cards_import.process_cards_upload,
         pass_operator_id=True,
     )
