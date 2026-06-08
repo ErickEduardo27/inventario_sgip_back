@@ -82,21 +82,28 @@ def _run_gcs_import(
                     "errors": ["import_jobs: registro inexistente"],
                 }
 
-            def progress_cb(percent: int, total: int, updated: int, inserted: int) -> None:
-                meta = _progress_meta(percent, total, updated, inserted)
+            def _persist_job_progress(meta: dict[str, Any]) -> None:
                 task.update_state(state="PROGRESS", meta=meta)
-                jobs_svc.update_progress(
-                    db,
-                    job,
-                    progress=int(meta["progress"]),
-                    total_rows=int(meta["total_rows"]),
-                    processed=int(meta["processed"]),
-                    inserted=int(meta["inserted"]),
-                    updated=int(meta["updated"]),
-                    registered=int(meta["registered"]),
-                    message=str(meta["message"]),
-                )
-                db.commit()
+                # Sesión aparte: no hacer commit sobre la conexión del COPY masivo.
+                with SessionLocal() as progress_db:
+                    progress_job = jobs_svc.get_import_job(progress_db, job_uuid, tenant_uuid)
+                    if progress_job is None:
+                        return
+                    jobs_svc.update_progress(
+                        progress_db,
+                        progress_job,
+                        progress=int(meta["progress"]),
+                        total_rows=int(meta["total_rows"]),
+                        processed=int(meta["processed"]),
+                        inserted=int(meta["inserted"]),
+                        updated=int(meta["updated"]),
+                        registered=int(meta["registered"]),
+                        message=str(meta["message"]),
+                    )
+                    progress_db.commit()
+
+            def progress_cb(percent: int, total: int, updated: int, inserted: int) -> None:
+                _persist_job_progress(_progress_meta(percent, total, updated, inserted))
 
             result = processor(
                 db,
