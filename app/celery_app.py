@@ -37,3 +37,8 @@ celery_app.conf.update(
     enable_utc=True,
     task_track_started=True,
 )
+
+# Registra tablas referenciadas por FKs (import_jobs → tenants, users).
+from app.modules.iam import models as _iam_models  # noqa: F401, E402
+from app.modules.inventory import models as _inventory_models  # noqa: F401, E402
+from app.modules.tenants import models as _tenants_models  # noqa: F401, E402
