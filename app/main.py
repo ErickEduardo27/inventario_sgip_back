@@ -14,7 +14,7 @@ from app.modules.tenants.models import Tenant
 
 
 def _cors_allow_origins() -> list[str]:
-    """Orígenes CORS: Vite (5173), preview (4173) y `CORS_EXTRA_ORIGINS` en .env (IP de red, otro host)."""
+    """Orígenes CORS: desarrollo local, `FRONTEND_URL`, `CORS_EXTRA_ORIGINS` y hosts fijos de producción."""
     settings = get_settings()
     defaults = [
         "http://localhost:5173",
@@ -27,11 +27,24 @@ def _cors_allow_origins() -> list[str]:
         "http://127.0.0.1:3001",
         "http://localhost:8080",
         "http://127.0.0.1:8080",
-        "https://mi-backend-238356790822.us-central1.run.app",
         "https://inventario-sgip.onrender.com",
+        "https://www.inventario-sgip.onrender.com",
     ]
-    extra = [x.strip() for x in settings.cors_extra_origins.split(",") if x.strip()]
+    if settings.frontend_url.strip():
+        defaults.append(settings.frontend_url.strip().rstrip("/"))
+    extra = [x.strip().rstrip("/") for x in settings.cors_extra_origins.split(",") if x.strip()]
     return list(dict.fromkeys(defaults + extra))
+
+
+def _cors_allow_origin_regex() -> str:
+    """Regex de orígenes permitidos (subdominios localhost, Render, Cloud Run, etc.)."""
+    return (
+        r"https?://([a-zA-Z0-9-]+\.)+localhost(:\d+)?"
+        r"|https?://localhost(:\d+)?"
+        r"|https?://127\.0\.0\.1(:\d+)?"
+        r"|https://[\w-]+(\.[\w-]+)*\.onrender\.com"
+        r"|https://[\w-]+(\.[\w-]+)*\.run\.app"
+    )
 
 
 @asynccontextmanager
@@ -83,10 +96,11 @@ app = FastAPI(title="Inventario SGIP API", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_allow_origins(),
-    allow_origin_regex=r"https?://([a-zA-Z0-9-]+\.)+localhost(:\d+)?|https?://localhost(:\d+)?|https?://127\.0\.0\.1(:\d+)?",
+    allow_origin_regex=_cors_allow_origin_regex(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"],
 )
 
 app.include_router(api_router)

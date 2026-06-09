@@ -41,6 +41,11 @@ class Settings(BaseSettings):
         default="",
         description="Orígenes CORS adicionales separados por coma (ej. http://192.168.1.10:5173)",
     )
+    frontend_url: str = Field(
+        default="",
+        description="URL pública del front (sin barra final). Se añade automáticamente a CORS en producción.",
+        validation_alias=AliasChoices("FRONTEND_URL", "CORS_FRONTEND_URL"),
+    )
 
     jwt_secret: str = Field(
         default="change-me-in-production",
@@ -115,6 +120,10 @@ class Settings(BaseSettings):
     gcs_import_prefix: str = Field(
         default="imports",
         description="Prefijo de objetos GCS para imports (ej. imports/margesi/...).",
+    )
+    gcs_item_photos_prefix: str = Field(
+        default="item-photos",
+        description="Prefijo GCS para fotos de bienes en hoja de captura.",
     )
     google_application_credentials: str = Field(
         default="",

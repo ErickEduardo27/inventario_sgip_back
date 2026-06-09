@@ -163,6 +163,7 @@ class CardItemWrite(BaseModel):
     mar_flag: str | None = None
     mar_foto: str | None = None
     mar_foto2: str | None = None
+    mar_foto3: str | None = None
     mar_mar: str | None = None
     mar_med: str | None = None
     mar_mod: str | None = None
@@ -225,6 +226,7 @@ class RecordQuery(BaseModel):
     column: str = "code"
     value: str | None = None
     search: str | None = None
+    establishment_id: int | None = None
     column_ord: str | None = None
     ord_tipo: str = "asc"
 
@@ -494,3 +496,4 @@ class ItemPhotoUploadResult(BaseModel):
     success: bool = True
     message: str = ""
     filename: str | None = None
+    url: str | None = None

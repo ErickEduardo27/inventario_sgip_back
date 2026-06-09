@@ -520,6 +520,8 @@ def list_environments(
     if order_col not in allowed_cols | {"id", "created_at"}:
         order_col = "code"
     stmt = select(m.InvEnvironment).where(m.InvEnvironment.tenant_id == tenant_id)
+    if q.establishment_id is not None:
+        stmt = stmt.where(m.InvEnvironment.establishment_id == q.establishment_id)
 
     pattern = _search_like(q)
     if pattern is not None:
@@ -644,20 +646,10 @@ def item_card_tables(db: Session, tenant_id: UUID, user_id: UUID) -> dict[str, A
 def save_hoja_captura_item_photo(
     tenant_id: UUID, inv_num: str, slot: int, content: bytes, original_name: str
 ) -> str:
-    import re
-    from pathlib import Path
+    from app.core.item_photo_storage import upload_item_photo
 
-    if slot not in (1, 2):
-        raise ValueError("Slot de foto inválido")
-    inv = re.sub(r"[^\w.-]+", "_", (inv_num or "").strip()) or "sin_num"
-    ext = Path(original_name or "").suffix.lower()
-    if ext not in {".jpg", ".jpeg", ".png", ".webp", ".gif"}:
-        ext = ".jpg"
-    filename = f"{inv}_{slot}{ext}"
-    base = Path(__file__).resolve().parents[3] / "uploads" / "hoja_captura" / str(tenant_id)
-    base.mkdir(parents=True, exist_ok=True)
-    (base / filename).write_bytes(content)
-    return filename
+    _ = original_name
+    return upload_item_photo(tenant_id=tenant_id, inv_num=inv_num, slot=slot, content=content)
 
 
 def _find_margesi_by_tipo(db: Session, tenant_id: UUID, valor: str, tipo: str) -> m.InvMargesiItem | None:
@@ -1088,6 +1080,7 @@ def store_card_item(
         "mar_flag",
         "mar_foto",
         "mar_foto2",
+        "mar_foto3",
         "mar_mar",
         "mar_med",
         "mar_mod",

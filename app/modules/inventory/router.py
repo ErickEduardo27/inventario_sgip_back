@@ -100,6 +100,7 @@ def _q(
     column: str = Query("code"),
     value: str | None = Query(None),
     search: str | None = Query(None, description="Búsqueda en campos principales del módulo"),
+    establishment_id: int | None = Query(None, description="Filtrar ambientes por local"),
     column_ord: str | None = Query(None, alias="columnOrd"),
     ord_tipo: str = Query("asc", alias="ordTipo"),
 ) -> RecordQuery:
@@ -109,6 +110,7 @@ def _q(
         column=column,
         value=value,
         search=search,
+        establishment_id=establishment_id,
         column_ord=column_ord,
         ord_tipo=ord_tipo,
     )
@@ -720,12 +722,17 @@ async def hoja_captura_upload_item_photo(
     if not content:
         raise HTTPException(status_code=400, detail="Archivo vacío")
     try:
-        filename = inv.save_hoja_captura_item_photo(
+        url = inv.save_hoja_captura_item_photo(
             tenant_id, inv_num, slot, content, file.filename or "foto.jpg"
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return ItemPhotoUploadResult(success=True, message="Foto guardada", filename=filename)
+    return ItemPhotoUploadResult(
+        success=True,
+        message="Foto guardada",
+        url=url,
+        filename=url.rsplit("/", 1)[-1] if url else None,
+    )
 
 
 @router.get("/hoja-captura/item/record/{card_id}", response_model=PagedRows)
