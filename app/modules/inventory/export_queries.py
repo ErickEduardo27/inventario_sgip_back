@@ -174,6 +174,47 @@ EXPORT_QUERIES: dict[str, tuple[str, str]] = {
         """,
         "hoja_captura_export",
     ),
+    "item_cards": (
+        """
+        SELECT
+            ic.id AS id_bien,
+            COALESCE(c.hoj_num, '') AS numero_hoja,
+            COALESCE(ic.inv_num, '') AS numero_inventario,
+            COALESCE(ic.mar_sit_conta, '') AS situacion_contable,
+            COALESCE(ic.inv_sit, '') AS situacion,
+            CASE WHEN ic.inv_con = '1' THEN 'Si' ELSE COALESCE(ic.inv_con, '') END AS conciliado,
+            COALESCE(ic.mar_num, '') AS codigo_interno,
+            COALESCE(ic.extra->>'mar_eti', '') AS etiqueta_fisica,
+            COALESCE(ic.mar_cpat, '') AS codigo_sbn,
+            COALESCE(ic.mar_des, '') AS descripcion,
+            COALESCE(ic.extra->>'mar_est', '') AS estado,
+            COALESCE(ic.extra->>'mar_uso', '') AS uso,
+            COALESCE(ic.extra->>'mar_seg', '') AS seguro,
+            COALESCE(ic.extra->>'mar_col', '') AS color,
+            COALESCE(ic.extra->>'mar_mar', '') AS marca,
+            COALESCE(ic.extra->>'mar_mod', '') AS modelo,
+            COALESCE(ic.extra->>'mar_tip', '') AS tipo,
+            COALESCE(ic.extra->>'mar_ser', '') AS serie,
+            COALESCE(est.code, '') AS codigo_local,
+            COALESCE(est.description, '') AS local,
+            COALESCE(env.code, '') AS codigo_ambiente,
+            COALESCE(env.description, '') AS ambiente,
+            COALESCE(cc.code, '') AS codigo_centro_costo,
+            COALESCE(cc.description, '') AS centro_costo,
+            COALESCE(p.number, '') AS documento_usuario,
+            COALESCE(p.name, '') AS usuario,
+            ic.created_at AS fecha_creacion
+        FROM itemcards ic
+        LEFT JOIN cards c ON c.id = ic.id_card AND c.tenant_id = ic.tenant_id
+        LEFT JOIN enviroments env ON env.id = c.id_ambiente AND env.tenant_id = c.tenant_id
+        LEFT JOIN establishments est ON est.id = env.establishment_id AND est.tenant_id = c.tenant_id
+        LEFT JOIN cost_center cc ON cc.id = c.id_ccosto AND cc.tenant_id = c.tenant_id
+        LEFT JOIN persons p ON p.id = c.id_usuario AND p.tenant_id = c.tenant_id
+        WHERE ic.tenant_id = %s::uuid
+        ORDER BY ic.id DESC
+        """,
+        "bienes_inventariados_export",
+    ),
 }
 
 

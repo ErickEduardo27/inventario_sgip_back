@@ -843,6 +843,12 @@ def item_cards_records(
     return PagedRows(data=rows, meta=PagedMeta(**inv.paged_meta(total, q.page, q.per_page)))
 
 
+@router.get(
+    "/item-cards/export",
+    _csv_export_route("item_cards", "bienes"),
+)
+
+
 @router.get("/item-cards/{row_id}")
 def item_card_get(row_id: int, db: Session = Depends(get_db), tenant_id: UUID = Depends(get_tenant_id)):
     from app.modules.inventory import models as m
