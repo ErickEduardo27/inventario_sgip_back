@@ -130,6 +130,15 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("GCS_IMPORT_PREFIX_LOGOS", "GCS_LOGOS_PREFIX"),
         description="Prefijo GCS para logos de tenant (PDF ficha inventario). Ej. tenant-logos/{tenant_id}/logo.png",
     )
+    gcs_export_prefix: str = Field(
+        default="exports",
+        validation_alias=AliasChoices("GCS_IMPORT_PREFIX_EXPORT", "GCS_EXPORT_PREFIX"),
+        description="Prefijo GCS para exportaciones CSV (ej. exports/reporte_aptot/...).",
+    )
+    gcs_export_signed_url_ttl_minutes: int = Field(
+        default=60,
+        description="Minutos de validez de la URL firmada para descargar exportaciones desde GCS.",
+    )
     google_application_credentials: str = Field(
         default="",
         validation_alias=AliasChoices(

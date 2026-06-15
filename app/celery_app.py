@@ -27,6 +27,7 @@ celery_app = Celery(
         "app.tasks.establishment_import",
         "app.tasks.bulk_imports",
         "app.tasks.reporte_aptot",
+        "app.tasks.csv_exports",
     ],
 )
 

@@ -13,8 +13,8 @@ from app.modules.settings.service import SettingsService
 router = APIRouter()
 
 
-@router.get("", response_model=SettingsOut)
-def get_settings(
+@router.get("/", response_model=SettingsOut)
+def read_workspace_settings(
     db: Session = Depends(get_db),
     tenant_id: UUID = Depends(get_tenant_id),
     _: User = Depends(require_permission("settings", "view")),
@@ -22,7 +22,7 @@ def get_settings(
     return SettingsService(db).get_settings(tenant_id)
 
 
-@router.put("", response_model=SettingsOut)
+@router.put("/", response_model=SettingsOut)
 def update_settings(
     body: SettingsUpdate,
     db: Session = Depends(get_db),

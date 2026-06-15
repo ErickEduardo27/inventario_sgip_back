@@ -1,6 +1,7 @@
 """Exportación masiva CSV vía PostgreSQL COPY (rápida para cientos de miles de filas)."""
 
 import io
+import logging
 from datetime import date
 from typing import Any
 from uuid import UUID
@@ -10,19 +11,41 @@ from sqlalchemy.orm import Session
 
 from app.db.session import engine
 
+logger = logging.getLogger(__name__)
 
 def copy_query_to_csv_bytes(inner_sql: str, params: tuple) -> bytes:
-    """Ejecuta ``COPY (SELECT …) TO STDOUT WITH CSV HEADER`` sobre conexión DBAPI directa."""
+    """Ejecuta COPY (SELECT …) TO STDOUT WITH CSV HEADER."""
     conn = engine.raw_connection()
+
     try:
         cur = conn.cursor()
+
         copy_sql = cur.mogrify(
             "COPY (" + inner_sql + ") TO STDOUT WITH (FORMAT CSV, HEADER TRUE, ENCODING 'UTF8')",
             params,
         ).decode("utf-8")
+
         buf = io.BytesIO()
+
+        logger.info("INICIO EXPORT")
+
         cur.copy_expert(copy_sql, buf)
-        return buf.getvalue()
+
+        logger.info("COPY FINALIZADO")
+
+        payload = buf.getvalue()
+
+        logger.info(
+            "CSV SIZE %.2f MB",
+            len(payload) / 1024 / 1024
+        )
+
+        return payload
+
+    except Exception:
+        logger.exception("ERROR DURANTE COPY")
+        raise
+
     finally:
         conn.rollback()
         conn.close()

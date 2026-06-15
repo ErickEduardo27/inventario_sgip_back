@@ -401,6 +401,35 @@ class InvImportJob(Base, TenantMixin, TimestampMixin):
     extra: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
 
 
+class InvDescargaArchivo(Base, TenantMixin, TimestampMixin):
+    """Exportación CSV asíncrona (Celery → GCS → URL firmada)."""
+
+    __tablename__ = "descarga_archivos"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    celery_task_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    module: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    filename: Mapped[str] = mapped_column(String(500), nullable=False)
+    gcs_path: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    download_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    state: Mapped[str] = mapped_column(String(32), nullable=False, default="pending", index=True)
+    progress: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    file_size_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    message: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    errors: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, default=list)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_by_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
+
 class InvItemRegistrationLog(Base, TenantMixin):
     """Registro append-only de creación de bienes por usuario (estadísticas)."""
 

@@ -11,6 +11,7 @@ from fastapi.responses import Response
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user, get_db, get_tenant_id
+from app.core.export_storage import read_export_file
 from app.modules.iam.dependencies import require_permission
 from app.modules.iam.models import User
 from app.modules.inventory import conciliation as conc
@@ -22,6 +23,7 @@ from app.modules.inventory import environment_import as env_import
 from app.modules.inventory import establishment_import as est_import
 from app.modules.inventory import cards_import as cards_import_mod
 from app.modules.inventory import hoja_captura_import as hoja_captura_import_mod
+from app.modules.inventory import descarga_archivos_service as dl_svc
 from app.modules.inventory import import_common as imp_common
 from app.modules.inventory import geo_catalog as geo
 from app.modules.inventory import models as inv_models
@@ -33,6 +35,8 @@ from app.modules.inventory.schemas import (
     CardItemWrite,
     CardWrite,
     ConciliationFilters,
+    DescargaArchivoStartResponse,
+    DescargaArchivoStatus,
     ConciliationPairWrite,
     ConciliationSbnWrite,
     CostCenterWrite,
@@ -1247,12 +1251,49 @@ def reporte_aptot_refresh(
     return OkPayload(success=True, message="Actualización del reporte APTOT encolada")
 
 
-router.add_api_route(
-    "/reporte-aptot/export",
-    _csv_export_route("reporte_aptot", "reporte_aptot"),
-    methods=["GET"],
-    tags=["inventory"],
-)
+@router.post("/reporte-aptot/export", response_model=DescargaArchivoStartResponse)
+def reporte_aptot_export_start(
+    db: Session = Depends(get_db),
+    tenant_id: UUID = Depends(get_tenant_id),
+    user: User = Depends(require_permission("reporte_aptot", "export")),
+):
+    """Encola exportación APTOT: Celery genera CSV, lo sube a GCS y guarda URL en ``descarga_archivos``."""
+    return DescargaArchivoStartResponse(**dl_svc.schedule_reporte_aptot_export(db, tenant_id=tenant_id, created_by_id=user.id))
+
+
+@router.get("/reporte-aptot/export/{job_id}", response_model=DescargaArchivoStatus)
+def reporte_aptot_export_status(
+    job_id: UUID,
+    db: Session = Depends(get_db),
+    tenant_id: UUID = Depends(get_tenant_id),
+    _: User = Depends(require_permission("reporte_aptot", "export")),
+):
+    try:
+        return DescargaArchivoStatus(**dl_svc.get_descarga_archivo_status(db, job_id, tenant_id))
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/descarga-archivos/{job_id}/file")
+def descarga_archivo_file(
+    job_id: UUID,
+    db: Session = Depends(get_db),
+    tenant_id: UUID = Depends(get_tenant_id),
+    _: User = Depends(require_permission("reporte_aptot", "export")),
+):
+    """Proxy de descarga para exportaciones almacenadas en disco local (desarrollo sin GCS)."""
+    row = dl_svc.get_descarga_archivo(db, job_id, tenant_id)
+    if row is None or row.state != "success" or not row.gcs_path:
+        raise HTTPException(status_code=404, detail="Archivo no disponible")
+    try:
+        content = read_export_file(row.gcs_path)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"No se pudo leer el archivo: {exc}") from exc
+    return Response(
+        content=content,
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{row.filename}"'},
+    )
 
 
 # --- Conciliación ---

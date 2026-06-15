@@ -486,6 +486,28 @@ class ImportJobStatus(BaseModel):
     message: str = ""
 
 
+class DescargaArchivoStartResponse(BaseModel):
+    success: bool = True
+    async_job: bool = True
+    job_id: str
+    message: str = ""
+
+
+class DescargaArchivoStatus(BaseModel):
+    """Estado de exportación CSV asíncrona (``descarga_archivos``)."""
+
+    job_id: str
+    module: str
+    state: str
+    progress: int = 0
+    filename: str = ""
+    file_size_bytes: int | None = None
+    download_url: str | None = None
+    expires_at: str | None = None
+    errors: list[str] = Field(default_factory=list)
+    message: str = ""
+
+
 class EstablishmentImportJobStatus(BaseModel):
     job_id: str
     state: str
