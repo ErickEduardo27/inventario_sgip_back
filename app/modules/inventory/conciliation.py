@@ -5,10 +5,10 @@ from __future__ import annotations
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import String, cast, exists, func, or_, select
+from sqlalchemy import exists, func, or_, select
 from sqlalchemy.orm import Session
 
-from app.core.inventory_numbers import format_inv_num, try_parse_inventory_number
+from app.core.inventory_numbers import format_inv_num, numeric_column_filter, try_parse_inventory_number
 from app.modules.inventory import models as m
 from app.modules.inventory.reporte_aptot_cache import schedule_reporte_aptot_cache_refresh
 from app.modules.inventory.schemas import (
@@ -23,17 +23,11 @@ def _extra_dict(raw: Any) -> dict[str, Any]:
 
 
 def _filter_hoj_num(col: Any, raw: str) -> Any:
-    parsed = try_parse_inventory_number(raw)
-    if parsed is not None:
-        return col == parsed
-    return cast(col, String).ilike(f"%{raw}%")
+    return numeric_column_filter(col, raw)
 
 
 def _filter_inv_num(col: Any, raw: str) -> Any:
-    parsed = try_parse_inventory_number(raw)
-    if parsed is not None:
-        return col == parsed
-    return cast(col, String).ilike(f"%{raw}%")
+    return numeric_column_filter(col, raw)
 
 
 def _extra_text(col: Any, key: str) -> Any:

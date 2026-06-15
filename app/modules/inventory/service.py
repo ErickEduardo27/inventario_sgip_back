@@ -9,12 +9,19 @@ from datetime import date, datetime, time, timezone
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import String, asc, cast, desc, exists, func, or_, select
+from sqlalchemy import asc, desc, exists, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.exceptions import AppError
-from app.core.inventory_numbers import format_hoj_num, format_inv_num, parse_inventory_number, try_parse_inventory_number
+from app.core.inventory_numbers import (
+    format_hoj_num,
+    format_inv_num,
+    numeric_column_filter,
+    numeric_column_ilike,
+    parse_inventory_number,
+    try_parse_inventory_number,
+)
 from app.core.timezone import day_end_pe, day_start_pe, enrich_pe_timestamps, format_datetime_pe
 from app.modules.inventory import geo_catalog as geo
 from app.modules.inventory import models as m
@@ -55,6 +62,18 @@ def _search_like(q: RecordQuery) -> str | None:
     if term:
         return f"%{term}%"
     return None
+
+
+_CARD_INT_FILTER_COLS = frozenset({"hoj_num", "state", "hoj_can_tot"})
+_ITEMCARD_INT_FILTER_COLS = frozenset({"inv_num", "id_card", "id"})
+_AUDIT_INT_FILTER_COLS = frozenset({"itemcard_id", "card_id"})
+
+
+def _where_column_ilike(model: type, col_name: str, value: str, *, numeric_cols: frozenset[str]) -> Any:
+    col = getattr(model, col_name)
+    if col_name in numeric_cols:
+        return numeric_column_filter(col, value)
+    return col.ilike(f"%{value}%")
 
 
 def row_to_dict(obj: Any) -> dict[str, Any]:
@@ -840,7 +859,7 @@ def list_cards(db: Session, tenant_id: UUID, q: RecordQuery, allowed_cols: set[s
             .outerjoin(cc, (cc.id == m.InvCard.id_ccosto) & (cc.tenant_id == m.InvCard.tenant_id))
             .where(
                 or_(
-                    cast(m.InvCard.hoj_num, String).ilike(pattern),
+                    numeric_column_ilike(m.InvCard.hoj_num, pattern),
                     m.InvCard.nota_interna.ilike(pattern),
                     m.InvCard.nota_ficha.ilike(pattern),
                     env.code.ilike(pattern),
@@ -852,12 +871,8 @@ def list_cards(db: Session, tenant_id: UUID, q: RecordQuery, allowed_cols: set[s
             .distinct()
         )
     elif q.value not in (None, ""):
-        if col == "hoj_num":
-            parsed = try_parse_inventory_number(q.value)
-            if parsed is not None:
-                stmt = stmt.where(m.InvCard.hoj_num == parsed)
-            else:
-                stmt = stmt.where(cast(m.InvCard.hoj_num, String).ilike(f"%{q.value}%"))
+        if col in _CARD_INT_FILTER_COLS:
+            stmt = stmt.where(_where_column_ilike(m.InvCard, col, q.value, numeric_cols=_CARD_INT_FILTER_COLS))
         else:
             stmt = stmt.where(getattr(m.InvCard, col).ilike(f"%{q.value}%"))
     order_col = q.column_ord or "hoj_num"
@@ -1364,12 +1379,8 @@ def list_item_cards(db: Session, tenant_id: UUID, q: RecordQuery, allowed_cols: 
         stmt = stmt.where(m.InvItemCard.id_card == cid)
     elif q.value not in (None, ""):
         col = q.column if q.column in allowed_cols else "inv_num"
-        if col == "inv_num":
-            parsed = try_parse_inventory_number(q.value)
-            if parsed is not None:
-                stmt = stmt.where(m.InvItemCard.inv_num == parsed)
-            else:
-                stmt = stmt.where(cast(m.InvItemCard.inv_num, String).ilike(f"%{q.value}%"))
+        if col in _ITEMCARD_INT_FILTER_COLS:
+            stmt = stmt.where(_where_column_ilike(m.InvItemCard, col, q.value, numeric_cols=_ITEMCARD_INT_FILTER_COLS))
         else:
             stmt = stmt.where(getattr(m.InvItemCard, col).ilike(f"%{q.value}%"))
 
@@ -1621,7 +1632,7 @@ def list_item_audit_logs(
                 log.action.ilike(like),
                 User.full_name.ilike(like),
                 User.email.ilike(like),
-                cast(m.InvCard.hoj_num, String).ilike(like),
+                numeric_column_ilike(m.InvCard.hoj_num, like),
             )
         )
     elif q.value not in (None, ""):
@@ -1631,11 +1642,11 @@ def list_item_audit_logs(
         elif col == "user_email":
             stmt = stmt.where(User.email.ilike(f"%{q.value}%"))
         elif col == "hoj_num":
-            parsed = try_parse_inventory_number(q.value)
-            if parsed is not None:
-                stmt = stmt.where(m.InvCard.hoj_num == parsed)
-            else:
-                stmt = stmt.where(cast(m.InvCard.hoj_num, String).ilike(f"%{q.value}%"))
+            stmt = stmt.where(numeric_column_filter(m.InvCard.hoj_num, q.value))
+        elif col in _AUDIT_INT_FILTER_COLS:
+            stmt = stmt.where(_where_column_ilike(log, col, q.value, numeric_cols=_AUDIT_INT_FILTER_COLS))
+        elif col == "inv_num":
+            stmt = stmt.where(m.InvItemAuditLog.inv_num.ilike(f"%{q.value}%"))
         elif hasattr(log, col):
             stmt = stmt.where(getattr(log, col).ilike(f"%{q.value}%"))
 

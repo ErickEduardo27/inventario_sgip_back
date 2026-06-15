@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import re
+from typing import Any
+
+from sqlalchemy import String, cast
 
 _DIGITS = re.compile(r"[^0-9]+")
 
@@ -45,3 +48,19 @@ def format_inv_num(value: int | None) -> str:
     if value is None:
         return ""
     return str(int(value))
+
+
+def numeric_column_filter(column: Any, raw: str) -> Any:
+    """Filtro por columna entera: igualdad si el valor es numérico; si no, ``ILIKE`` sobre texto."""
+    s = (raw or "").strip()
+    if not s:
+        return column.is_(None)
+    parsed = try_parse_inventory_number(s)
+    if parsed is not None:
+        return column == parsed
+    return cast(column, String).ilike(f"%{s}%")
+
+
+def numeric_column_ilike(column: Any, pattern: str) -> Any:
+    """``ILIKE`` sobre columna entera (patrón con ``%``)."""
+    return cast(column, String).ilike(pattern)
