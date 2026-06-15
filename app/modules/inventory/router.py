@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from datetime import date
+from typing import Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
+from fastapi.responses import Response
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user, get_db, get_tenant_id
@@ -25,8 +27,9 @@ from app.modules.inventory import geo_catalog as geo
 from app.modules.inventory import models as inv_models
 from app.modules.inventory import service as inv
 from app.modules.inventory.csv_export import csv_download_response
-from app.modules.inventory.export_queries import get_export_query
+from app.modules.inventory.export_queries import build_cards_export_query, build_item_cards_export_query, get_export_query
 from app.modules.inventory.schemas import (
+    AuditLogQuery,
     CardItemWrite,
     CardWrite,
     ConciliationFilters,
@@ -51,6 +54,7 @@ from app.modules.inventory.schemas import (
     ImportNoConciliableMatchRequest,
     NoConciliableMarkWrite,
     InventoryDashboardResponse,
+    InventoryUserRegistrationsResponse,
     InventoryNumWrite,
     ItemCardTablesResponse,
     ItemPhotoUploadResult,
@@ -103,6 +107,11 @@ def _q(
     establishment_id: int | None = Query(None, description="Filtrar ambientes por local"),
     column_ord: str | None = Query(None, alias="columnOrd"),
     ord_tipo: str = Query("asc", alias="ordTipo"),
+    flag_firma: bool | None = Query(None, description="Filtrar hojas por flag de firma"),
+    inv_sit_filter: Literal["C", "S"] | None = Query(
+        None,
+        description="Filtrar bienes: C conciliados, S sobrantes",
+    ),
 ) -> RecordQuery:
     return RecordQuery(
         page=page,
@@ -113,6 +122,8 @@ def _q(
         establishment_id=establishment_id,
         column_ord=column_ord,
         ord_tipo=ord_tipo,
+        flag_firma=flag_firma,
+        inv_sit_filter=inv_sit_filter,
     )
 
 
@@ -145,6 +156,32 @@ def _conciliation_q(
         numero_hoja=numero_hoja,
         numero_inv=numero_inv,
         situacion=situacion,
+    )
+
+
+def _audit_q(
+    page: int = Query(1, ge=1),
+    per_page: int = Query(15, ge=1, le=200),
+    column: str = Query("inv_num"),
+    value: str | None = Query(None),
+    search: str | None = Query(None, description="Búsqueda en usuario, N° inventario, descripción, hoja"),
+    column_ord: str | None = Query(None, alias="columnOrd"),
+    ord_tipo: str = Query("desc", alias="ordTipo"),
+    action: str | None = Query(None, description="create | update | delete"),
+    date_from: date | None = Query(None, description="Desde (YYYY-MM-DD)"),
+    date_to: date | None = Query(None, description="Hasta (YYYY-MM-DD)"),
+) -> AuditLogQuery:
+    return AuditLogQuery(
+        page=page,
+        per_page=per_page,
+        column=column,
+        value=value,
+        search=search,
+        column_ord=column_ord,
+        ord_tipo=ord_tipo,
+        action=action,
+        date_from=date_from,
+        date_to=date_to,
     )
 
 
@@ -324,7 +361,7 @@ def person_get(row_id: int, db: Session = Depends(get_db), tenant_id: UUID = Dep
     row = db.get(m.InvPerson, row_id)
     if not row or row.tenant_id != tenant_id:
         raise HTTPException(status_code=404, detail="No encontrado")
-    return inv.row_to_dict(row)
+    return inv.inventory_row_dict(row)
 
 
 @router.post("/persons", response_model=OkPayload)
@@ -401,7 +438,7 @@ def cost_center_get(row_id: int, db: Session = Depends(get_db), tenant_id: UUID 
     row = db.get(m.InvCostCenter, row_id)
     if not row or row.tenant_id != tenant_id:
         raise HTTPException(status_code=404, detail="No encontrado")
-    return inv.row_to_dict(row)
+    return inv.inventory_row_dict(row)
 
 
 @router.post("/cost-centers", response_model=OkPayload)
@@ -483,7 +520,7 @@ def environment_get(row_id: int, db: Session = Depends(get_db), tenant_id: UUID 
     row = db.get(m.InvEnvironment, row_id)
     if not row or row.tenant_id != tenant_id:
         raise HTTPException(status_code=404, detail="No encontrado")
-    return inv.row_to_dict(row)
+    return inv.inventory_row_dict(row)
 
 
 @router.post("/environments", response_model=OkPayload)
@@ -548,12 +585,25 @@ def cards_records(db: Session = Depends(get_db), tenant_id: UUID = Depends(get_t
     return PagedRows(data=rows, meta=PagedMeta(**inv.paged_meta(total, q.page, q.per_page)))
 
 
-router.add_api_route(
-    "/hoja-captura/export",
-    _csv_export_route("cards", "hoja_captura"),
-    methods=["GET"],
-    tags=["inventory"],
-)
+@router.get("/hoja-captura/export")
+def hoja_captura_export(
+    db: Session = Depends(get_db),
+    tenant_id: UUID = Depends(get_tenant_id),
+    q: RecordQuery = Depends(_q),
+    _: User = Depends(require_permission("hoja_captura", "export")),
+):
+    """Export CSV de hojas; acepta ``search`` y ``flag_firma`` como el listado (COPY en PostgreSQL)."""
+    try:
+        inner_sql, params, filename_base = build_cards_export_query(tenant_id, q)
+        return csv_download_response(
+            db,
+            tenant_id=tenant_id,
+            inner_sql=inner_sql,
+            filename_base=filename_base,
+            params=params,
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"Error al exportar CSV: {exc}") from exc
 
 
 @router.get("/cards/{row_id}")
@@ -563,7 +613,7 @@ def card_get(row_id: int, db: Session = Depends(get_db), tenant_id: UUID = Depen
     row = db.get(m.InvCard, row_id)
     if not row or row.tenant_id != tenant_id:
         raise HTTPException(status_code=404, detail="No encontrado")
-    return inv.row_to_dict(row)
+    return inv.inventory_row_dict(row)
 
 
 @router.post("/cards", response_model=OkPayload)
@@ -735,6 +785,21 @@ async def hoja_captura_upload_item_photo(
     )
 
 
+@router.get("/hoja-captura/item-photo/preview")
+def hoja_captura_item_photo_preview(
+    src: str = Query(..., min_length=1),
+    tenant_id: UUID = Depends(get_tenant_id),
+    _: User = Depends(get_current_user),
+):
+    from app.core.item_photo_storage import read_item_photo_bytes
+
+    result = read_item_photo_bytes(src, tenant_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Foto no encontrada")
+    data, mime = result
+    return Response(content=data, media_type=mime)
+
+
 @router.get("/hoja-captura/item/record/{card_id}", response_model=PagedRows)
 def hoja_captura_item_record(
     card_id: int,
@@ -819,6 +884,26 @@ def hoja_captura_close(
     return OkPayload(success=True, message=msg)
 
 
+@router.get("/hoja-captura/{card_id}/pdf-ficha")
+def hoja_captura_pdf_ficha(
+    card_id: int,
+    db: Session = Depends(get_db),
+    tenant_id: UUID = Depends(get_tenant_id),
+    _: User = Depends(get_current_user),
+):
+    try:
+        pdf_bytes, filename = inv.build_hoja_captura_ficha_pdf(db, tenant_id, card_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"Error al generar PDF: {exc}") from exc
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
 @router.get("/margesi/item/{valor}/{tipo}", response_model=MargesiLookupResult)
 def margesi_lookup(
     valor: str,
@@ -843,10 +928,25 @@ def item_cards_records(
     return PagedRows(data=rows, meta=PagedMeta(**inv.paged_meta(total, q.page, q.per_page)))
 
 
-@router.get(
-    "/item-cards/export",
-    _csv_export_route("item_cards", "bienes"),
-)
+@router.get("/item-cards/export")
+def item_cards_export(
+    db: Session = Depends(get_db),
+    tenant_id: UUID = Depends(get_tenant_id),
+    q: RecordQuery = Depends(_q),
+    _: User = Depends(require_permission("bienes", "export")),
+):
+    """Export CSV de bienes; acepta filtros del listado (COPY en PostgreSQL)."""
+    try:
+        inner_sql, params, filename_base = build_item_cards_export_query(tenant_id, q)
+        return csv_download_response(
+            db,
+            tenant_id=tenant_id,
+            inner_sql=inner_sql,
+            filename_base=filename_base,
+            params=params,
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"Error al exportar CSV: {exc}") from exc
 
 
 @router.get("/item-cards/{row_id}")
@@ -856,7 +956,7 @@ def item_card_get(row_id: int, db: Session = Depends(get_db), tenant_id: UUID = 
     row = db.get(m.InvItemCard, row_id)
     if not row or row.tenant_id != tenant_id:
         raise HTTPException(status_code=404, detail="No encontrado")
-    return inv.row_to_dict(row)
+    return inv.inventory_row_dict(row)
 
 
 @router.post("/item-cards/{item_id}/translate", response_model=OkPayload)
@@ -879,9 +979,9 @@ def item_card_delete(
     id_card: int = Query(..., description="ID de la hoja (`BienesController::destroy`)"),
     db: Session = Depends(get_db),
     tenant_id: UUID = Depends(get_tenant_id),
-    _: User = Depends(get_current_user),
+    user: User = Depends(get_current_user),
 ):
-    ok, msg = inv.delete_item_card(db, tenant_id, item_id, id_card)
+    ok, msg = inv.delete_item_card(db, tenant_id, item_id, id_card, operator_id=user.id)
     if not ok:
         raise HTTPException(status_code=400, detail=msg)
     return OkPayload(success=True, message=msg)
@@ -912,7 +1012,7 @@ def list_sbn_get(row_id: int, db: Session = Depends(get_db), tenant_id: UUID = D
     row = db.get(m.InvListSbn, row_id)
     if not row or row.tenant_id != tenant_id:
         raise HTTPException(status_code=404, detail="No encontrado")
-    return inv.row_to_dict(row)
+    return inv.inventory_row_dict(row)
 
 
 @router.post("/list-sbn", response_model=OkPayload)
@@ -1062,6 +1162,30 @@ async def margesi_import_moment(
     return MargesiImportResult(**result)
 
 
+# --- Auditoría de bienes ---
+
+
+@router.get("/audit-logs/records", response_model=PagedRows)
+def audit_log_records(
+    db: Session = Depends(get_db),
+    tenant_id: UUID = Depends(get_tenant_id),
+    _: User = Depends(get_current_user),
+    q: AuditLogQuery = Depends(_audit_q),
+):
+    allowed = {
+        "action",
+        "inv_num",
+        "mar_des",
+        "user_full_name",
+        "user_email",
+        "hoj_num",
+        "itemcard_id",
+        "card_id",
+    }
+    rows, total = inv.list_item_audit_logs(db, tenant_id, q, allowed)
+    return PagedRows(data=rows, meta=PagedMeta(**inv.paged_meta(total, q.page, q.per_page)))
+
+
 # --- Dashboard inventario ---
 
 
@@ -1082,6 +1206,53 @@ def inventory_dashboard(
         date_to=date_to,
         month=month,
     )
+
+
+@router.get("/dashboard/user-registrations", response_model=InventoryUserRegistrationsResponse)
+def inventory_user_registrations(
+    db: Session = Depends(get_db),
+    tenant_id: UUID = Depends(get_tenant_id),
+    establishment_id: int | None = Query(None, description="Filtrar por local (establishment id)"),
+    date_from: date | None = Query(None, description="Inicio del periodo (YYYY-MM-DD)"),
+    date_to: date | None = Query(None, description="Fin del periodo (YYYY-MM-DD)"),
+    month: str | None = Query(None, pattern=r"^\d{4}-\d{2}$", description="Filtrar un mes (YYYY-MM)"),
+):
+    return inv.inventory_user_registrations(
+        db,
+        tenant_id,
+        establishment_id=establishment_id,
+        date_from=date_from,
+        date_to=date_to,
+        month=month,
+    )
+
+
+@router.get("/reporte-aptot/cache-meta")
+def reporte_aptot_cache_meta(
+    db: Session = Depends(get_db),
+    tenant_id: UUID = Depends(get_tenant_id),
+    _: User = Depends(require_permission("reporte_aptot", "view")),
+):
+    return inv.get_reporte_aptot_cache_meta(db, tenant_id)
+
+
+@router.post("/reporte-aptot/refresh", response_model=OkPayload)
+def reporte_aptot_refresh(
+    tenant_id: UUID = Depends(get_tenant_id),
+    _: User = Depends(require_permission("reporte_aptot", "edit")),
+):
+    from app.modules.inventory.reporte_aptot_cache import schedule_reporte_aptot_cache_refresh
+
+    schedule_reporte_aptot_cache_refresh(tenant_id)
+    return OkPayload(success=True, message="Actualización del reporte APTOT encolada")
+
+
+router.add_api_route(
+    "/reporte-aptot/export",
+    _csv_export_route("reporte_aptot", "reporte_aptot"),
+    methods=["GET"],
+    tags=["inventory"],
+)
 
 
 # --- Conciliación ---

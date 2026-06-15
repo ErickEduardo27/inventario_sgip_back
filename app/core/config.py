@@ -125,6 +125,11 @@ class Settings(BaseSettings):
         default="item-photos",
         description="Prefijo GCS para fotos de bienes en hoja de captura.",
     )
+    gcs_logos_prefix: str = Field(
+        default="tenant-logos",
+        validation_alias=AliasChoices("GCS_IMPORT_PREFIX_LOGOS", "GCS_LOGOS_PREFIX"),
+        description="Prefijo GCS para logos de tenant (PDF ficha inventario). Ej. tenant-logos/{tenant_id}/logo.png",
+    )
     google_application_credentials: str = Field(
         default="",
         validation_alias=AliasChoices(

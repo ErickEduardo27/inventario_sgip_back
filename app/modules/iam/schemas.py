@@ -53,6 +53,18 @@ class UserOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class PagedMeta(BaseModel):
+    total: int
+    page: int
+    per_page: int
+    pages: int
+
+
+class PagedUserRows(BaseModel):
+    data: list[UserOut]
+    meta: PagedMeta
+
+
 class RoleCreate(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     code: str = Field(min_length=1, max_length=100)

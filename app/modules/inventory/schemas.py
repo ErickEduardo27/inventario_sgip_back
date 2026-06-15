@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from datetime import date
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from app.core.inventory_numbers import parse_inventory_number
 
 
 class OkPayload(BaseModel):
@@ -120,7 +122,7 @@ class EnvironmentWrite(BaseModel):
 
 class CardWrite(BaseModel):
     id: int | None = None
-    hoj_num: str = ""
+    hoj_num: int = 0
     hoj_fec: date | None = None
     hoj_can_tot: int = 0
     id_ambiente: int
@@ -141,6 +143,11 @@ class CardWrite(BaseModel):
     nota_ficha: str | None = None
     state: int = 1
 
+    @field_validator("hoj_num", mode="before")
+    @classmethod
+    def _coerce_hoj_num(cls, v: object) -> int:
+        return parse_inventory_number(v, field="Número de hoja", allow_empty=True)
+
 
 class CardItemWrite(BaseModel):
     """Cuerpo alineado con `CardsController::storeItem` (crear/actualizar ítem de hoja)."""
@@ -149,7 +156,7 @@ class CardItemWrite(BaseModel):
     id_margesi: int | None = None
     no_conciliar: bool = False
     mar_cpat_num: str = ""
-    inv_num: str | None = None
+    inv_num: int | None = None
     inv_num_1: str | None = None
     inv_num_2: str | None = None
     mar_ano: str | None = None
@@ -177,6 +184,13 @@ class CardItemWrite(BaseModel):
     mar_ser: str | None = None
     mar_tip: str | None = None
     mar_uso: str | None = None
+
+    @field_validator("inv_num", mode="before")
+    @classmethod
+    def _coerce_inv_num(cls, v: object) -> int | None:
+        if v is None or v == "":
+            return None
+        return parse_inventory_number(v, field="Número de inventario")
 
 
 class ItemCardTranslate(BaseModel):
@@ -229,6 +243,11 @@ class RecordQuery(BaseModel):
     establishment_id: int | None = None
     column_ord: str | None = None
     ord_tipo: str = "asc"
+    flag_firma: bool | None = None
+    inv_sit_filter: Literal["C", "S"] | None = Field(
+        default=None,
+        description="Filtrar bienes por situación: C conciliados, S sobrantes",
+    )
 
 
 class InventoryMonthlyCount(BaseModel):
@@ -243,9 +262,36 @@ class InventoryDashboardKpis(BaseModel):
     margesi_total: int
 
 
+class InventoryUserRegistrationStat(BaseModel):
+    user_id: str | None = None
+    full_name: str | None = None
+    email: str | None = None
+    total: int
+
+
 class InventoryDashboardResponse(BaseModel):
     kpis: InventoryDashboardKpis
     by_month: list[InventoryMonthlyCount]
+
+
+class InventoryUserRegistrationsResponse(BaseModel):
+    total: int
+    by_user: list[InventoryUserRegistrationStat]
+
+
+class AuditLogQuery(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    page: int = Field(default=1, ge=1)
+    per_page: int = Field(default=15, ge=1, le=200)
+    column: str = "inv_num"
+    value: str | None = None
+    search: str | None = None
+    column_ord: str | None = None
+    ord_tipo: str = "asc"
+    action: str | None = Field(default=None, description="create | update | delete")
+    date_from: date | None = None
+    date_to: date | None = None
 
 
 class ConciliationFilters(BaseModel):

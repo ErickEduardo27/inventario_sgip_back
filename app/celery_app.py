@@ -26,6 +26,7 @@ celery_app = Celery(
         "app.tasks.scheduled_dispatch",
         "app.tasks.establishment_import",
         "app.tasks.bulk_imports",
+        "app.tasks.reporte_aptot",
     ],
 )
 

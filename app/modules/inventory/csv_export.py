@@ -1,9 +1,8 @@
 """Exportación masiva CSV vía PostgreSQL COPY (rápida para cientos de miles de filas)."""
 
-from __future__ import annotations
-
 import io
 from datetime import date
+from typing import Any
 from uuid import UUID
 
 from fastapi.responses import Response
@@ -35,10 +34,12 @@ def csv_download_response(
     tenant_id: UUID,
     inner_sql: str,
     filename_base: str,
+    params: tuple[Any, ...] | None = None,
 ) -> Response:
     """Genera respuesta HTTP con CSV UTF-8 (BOM opcional para Excel en Windows)."""
     _ = db  # reservado por compatibilidad con Depends(get_db)
-    payload = copy_query_to_csv_bytes(inner_sql, (str(tenant_id),))
+    bind_params = params if params is not None else (str(tenant_id),)
+    payload = copy_query_to_csv_bytes(inner_sql, bind_params)
     stamp = date.today().isoformat()
     filename = f"{filename_base}_{stamp}.csv"
     return Response(

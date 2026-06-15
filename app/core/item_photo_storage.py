@@ -79,3 +79,62 @@ def read_local_item_photo(tenant_id: UUID, filename: str) -> tuple[bytes, str] |
         return None
     mime, _ = mimetypes.guess_type(safe)
     return path.read_bytes(), (mime or "image/jpeg").split(";")[0].strip() or "image/jpeg"
+
+
+def _parse_gcs_url(url: str) -> tuple[str, str] | None:
+    from urllib.parse import unquote, urlparse
+
+    parsed = urlparse(url.strip())
+    if parsed.netloc != "storage.googleapis.com":
+        return None
+    path = unquote(parsed.path or "").lstrip("/")
+    if not path or "/" not in path:
+        return None
+    bucket, key = path.split("/", 1)
+    return bucket, key
+
+
+def _tenant_in_object_key(tenant_id: UUID, key: str) -> bool:
+    tid = str(tenant_id)
+    parts = key.strip("/").split("/")
+    return tid in parts
+
+
+def _download_gcs_object(bucket: str, key: str) -> tuple[bytes, str] | None:
+    try:
+        data = _gcs_client().bucket(bucket).blob(key).download_as_bytes()
+    except Exception:
+        return None
+    mime, _ = mimetypes.guess_type(key)
+    return data, (mime or "image/jpeg").split(";")[0].strip() or "image/jpeg"
+
+
+def read_item_photo_bytes(stored: str, tenant_id: UUID) -> tuple[bytes, str] | None:
+    """Lee bytes de una foto referenciada en ``extra.mar_foto*`` (GCS, ruta pública local o nombre legacy)."""
+    raw = (stored or "").strip()
+    if not raw:
+        return None
+
+    marker = f"/api/public/item-photo/{tenant_id}/"
+    if marker in raw:
+        filename = raw.split(marker, 1)[-1].split("?")[0]
+        return read_local_item_photo(tenant_id, filename)
+
+    if re.fullmatch(r"[\w.-]+\.(?:jpe?g|png|webp|gif)", raw, re.I):
+        return read_local_item_photo(tenant_id, raw)
+
+    gcs = _parse_gcs_url(raw)
+    if gcs:
+        bucket, key = gcs
+        if not _tenant_in_object_key(tenant_id, key):
+            return None
+        return _download_gcs_object(bucket, key)
+
+    settings = get_settings()
+    prefix = (settings.gcs_item_photos_prefix or "item-photos").strip("/") or "item-photos"
+    if settings.gcs_bucket:
+        key = raw.lstrip("/")
+        if key.startswith(f"{prefix}/") and _tenant_in_object_key(tenant_id, key):
+            return _download_gcs_object(settings.gcs_bucket, key)
+
+    return None

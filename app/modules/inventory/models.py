@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
 
@@ -12,14 +12,17 @@ from sqlalchemy import (
     Boolean,
     CheckConstraint,
     Date,
+    DateTime,
     Float,
     ForeignKey,
+    Index,
     Integer,
     LargeBinary,
     Numeric,
     String,
     Text,
     UniqueConstraint,
+    func,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -269,9 +272,10 @@ class InvCard(Base, TenantMixin, TimestampMixin):
     """Hoja de captura `cards`."""
 
     __tablename__ = "cards"
+    __table_args__ = (UniqueConstraint("tenant_id", "hoj_num", name="uq_cards_tenant_hoj_num"),)
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
-    hoj_num: Mapped[str] = mapped_column(String(50), nullable=False, default="", index=True)
+    hoj_num: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
     hoj_fec: Mapped[date | None] = mapped_column(Date, nullable=True)
     hoj_can_tot: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     id_ambiente: Mapped[int] = mapped_column(
@@ -314,12 +318,13 @@ class InvItemCard(Base, TenantMixin, TimestampMixin):
     """Bien inventariado en hoja `itemcards` (Laravel `ItemTarjeta`)."""
 
     __tablename__ = "itemcards"
+    __table_args__ = (UniqueConstraint("tenant_id", "inv_num", name="uq_itemcards_tenant_inv_num"),)
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     id_card: Mapped[int] = mapped_column(
         BigInteger, ForeignKey("cards.id", ondelete="CASCADE"), nullable=False, index=True
     )
-    inv_num: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
+    inv_num: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
     mar_cpat: Mapped[str | None] = mapped_column(String(200), nullable=True, index=True)
     mar_num: Mapped[str | None] = mapped_column(String(200), nullable=True)
     mar_des: Mapped[str | None] = mapped_column(String(500), nullable=True)
@@ -394,3 +399,175 @@ class InvImportJob(Base, TenantMixin, TimestampMixin):
         index=True,
     )
     extra: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+
+
+class InvItemRegistrationLog(Base, TenantMixin):
+    """Registro append-only de creación de bienes por usuario (estadísticas)."""
+
+    __tablename__ = "item_registration_logs"
+    __table_args__ = (
+        Index("ix_item_reg_log_tenant_user", "tenant_id", "user_id"),
+        Index("ix_item_reg_log_tenant_created", "tenant_id", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    itemcard_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    card_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    inv_num: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+
+class InvItemAuditLog(Base, TenantMixin):
+    """Auditoría append-only de bienes inventariados (crear / editar / eliminar)."""
+
+    __tablename__ = "item_audit_logs"
+    __table_args__ = (
+        Index("ix_item_audit_log_tenant_created", "tenant_id", "created_at"),
+        Index("ix_item_audit_log_tenant_action", "tenant_id", "action"),
+        Index("ix_item_audit_log_tenant_user", "tenant_id", "user_id"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    action: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    itemcard_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True, index=True)
+    card_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    inv_num: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
+    mar_des: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+
+class InvUserAssignedBienes(Base, TenantMixin, TimestampMixin):
+    """Bienes asignados a un inventariador según sus hojas de captura (poblado por script SQL)."""
+
+    __tablename__ = "user_assigned_bienes"
+    __table_args__ = (UniqueConstraint("tenant_id", "user_id", name="uq_user_assigned_bienes_tenant_user"),)
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    total_bienes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    total_hojas: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    calculated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class InvReporteAptotCache(Base, TenantMixin):
+    """Cache materializado del reporte APTOT descarga total.
+
+    ``source_kind``: ``conciliado`` | ``sobrante`` | ``faltante``
+    """
+
+    __tablename__ = "reporte_aptot_cache"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "source_kind", "source_ref_id", name="uq_reporte_aptot_cache_source"),
+        Index("ix_reporte_aptot_cache_tenant", "tenant_id"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    source_kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    source_ref_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    refreshed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    itemcard_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    mar_sit_conta: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    mar_cpat: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    state: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    inv_sit: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    inv_con: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    mar_npri: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    mar_num: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    mar_ccat: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    mar_des: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    mar_esp: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    mar_est: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    mar_uso: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    mar_seg: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    mar_col: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    mar_mar: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    mar_mod: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    mar_tip: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    mar_ser: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    mar_med: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    mar_npla: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    mar_nmot: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    mar_ncha: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    mar_obs: Mapped[str | None] = mapped_column(Text, nullable=True)
+    inv_num_1: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    inv_num_2: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    inv_num: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    item_created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    item_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    hoj_num: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    hoj_fec: Mapped[date | None] = mapped_column(Date, nullable=True)
+    area_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    area_description: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    ambiente_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    ambiente_description: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    ambiente_piso: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    ambiente_piso_des: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    local_description: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    local_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    local_departamento: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    usuario_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    usuario: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    fecha_margesi: Mapped[date | None] = mapped_column(Date, nullable=True)
+    doc_margesi: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    cuenta_margesi: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    valor_margesi: Mapped[Decimal | None] = mapped_column(Numeric(16, 2), nullable=True)
+    margesi_sbn: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    margesi_area: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    margesi_departamento: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    margesi_local: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    margesi_ambiente: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    margesi_usuario: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    margesi_description: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    margesi_marca: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    margesi_modelo: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    margesi_tipo: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    margesi_serie: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    margesi_cod_local: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    local_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    margesi_obs: Mapped[str | None] = mapped_column(Text, nullable=True)
+    local_libre: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    ccosto_libre: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    ambiente_libre: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    usuario_libre: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    campo_libre: Mapped[str | None] = mapped_column(String(500), nullable=True)
+
+
+class InvReporteAptotCacheMeta(Base):
+    """Estado de la última reconstrucción del cache APTOT por tenant."""
+
+    __tablename__ = "reporte_aptot_cache_meta"
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("tenants.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    refreshed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    row_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending")
+    message: Mapped[str] = mapped_column(Text, nullable=False, default="")

@@ -19,6 +19,7 @@ import pandas as pd
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.core.inventory_numbers import format_hoj_num, parse_inventory_number
 from app.modules.inventory import models as m
 from app.modules.inventory.schemas import CardItemWrite
 from app.modules.inventory.service import recount_card_items, store_card_item
@@ -123,18 +124,18 @@ def _card_index(db: Session, tenant_id: UUID) -> dict[str, m.InvCard]:
     rows = db.scalars(select(m.InvCard).where(m.InvCard.tenant_id == tenant_id)).all()
     index: dict[str, m.InvCard] = {}
     for row in rows:
-        key = _normalize_hoj_num((row.hoj_num or "").strip())
-        if key and key not in index:
+        key = format_hoj_num(row.hoj_num)
+        if key not in index:
             index[key] = row
     return index
 
 
-def _inv_num_index(db: Session, tenant_id: UUID) -> dict[str, m.InvItemCard]:
-    index: dict[str, m.InvItemCard] = {}
+def _inv_num_index(db: Session, tenant_id: UUID) -> dict[int, m.InvItemCard]:
+    index: dict[int, m.InvItemCard] = {}
     rows = db.scalars(select(m.InvItemCard).where(m.InvItemCard.tenant_id == tenant_id)).all()
     for row in rows:
-        key = (row.inv_num or "").strip()
-        if key and key not in index:
+        key = row.inv_num
+        if key is not None and key not in index:
             index[key] = row
     return index
 
@@ -169,10 +170,7 @@ def _row_to_body(row: pd.Series) -> CardItemWrite | None:
 
 
 def _normalize_hoj_num(value: str) -> str:
-    s = value.strip()
-    if s.isdigit():
-        return str(int(s)).zfill(5)
-    return s
+    return format_hoj_num(parse_inventory_number(value, field="Número de hoja"))
 
 
 def bulk_import_hoja_captura_items(
@@ -222,7 +220,7 @@ def bulk_import_hoja_captura_items(
                     skipped += 1
                     continue
 
-                existing = inv_index.get((body.inv_num or "").strip())
+                existing = inv_index.get(body.inv_num) if body.inv_num is not None else None
                 if existing is not None:
                     if int(existing.id_card) != int(card.id):
                         errors.append(
@@ -253,8 +251,8 @@ def bulk_import_hoja_captura_items(
                     updated += 1
                 else:
                     inserted += 1
-                    inv_key = (body.inv_num or "").strip()
-                    if inv_key:
+                    inv_key = body.inv_num
+                    if inv_key is not None:
                         fresh = db.scalar(
                             select(m.InvItemCard).where(
                                 m.InvItemCard.tenant_id == tenant_id,

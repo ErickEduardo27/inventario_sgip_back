@@ -9,15 +9,18 @@ from datetime import date, datetime, time, timezone
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import asc, desc, exists, func, or_, select
+from sqlalchemy import String, asc, cast, desc, exists, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.exceptions import AppError
+from app.core.inventory_numbers import format_hoj_num, format_inv_num, parse_inventory_number, try_parse_inventory_number
+from app.core.timezone import day_end_pe, day_start_pe, enrich_pe_timestamps, format_datetime_pe
 from app.modules.inventory import geo_catalog as geo
 from app.modules.inventory import models as m
 from app.modules.iam.models import User
 from app.modules.inventory.schemas import (
+    AuditLogQuery,
     CardItemWrite,
     CardWrite,
     CostCenterWrite,
@@ -64,6 +67,11 @@ def row_to_dict(obj: Any) -> dict[str, Any]:
             v = v.isoformat()
         out[k] = v
     return out
+
+
+def inventory_row_dict(obj: Any) -> dict[str, Any]:
+    """Serialización de hoja/bien con fechas legibles en hora de Perú."""
+    return enrich_pe_timestamps(row_to_dict(obj))
 
 
 _PHOTO_WRITE_EXCLUDE = frozenset({"id", "photo_base64", "photo_clear", "photo_mime"})
@@ -561,11 +569,8 @@ def list_environments(
 # --- Cards (CardsController / HojaCapturaController) ---
 
 
-def _parse_sheet_num(raw: str) -> int:
-    try:
-        return int(str(raw).strip())
-    except (TypeError, ValueError) as e:
-        raise ValueError("Número de hoja inválido") from e
+def _parse_sheet_num(raw: int | str) -> int:
+    return parse_inventory_number(raw, field="Número de hoja", allow_empty=True)
 
 
 def user_inventory_conf(user: User | None) -> UserInventoryConf:
@@ -588,7 +593,7 @@ def _validate_hoj_num_range(user: User | None, hoj_num: int) -> None:
         raise ValueError("Número de hoja fuera de rango")
 
 
-def _hoj_num_taken(db: Session, tenant_id: UUID, hoj_num: str, exclude_id: int | None = None) -> bool:
+def _hoj_num_taken(db: Session, tenant_id: UUID, hoj_num: int, exclude_id: int | None = None) -> bool:
     stmt = select(m.InvCard.id).where(m.InvCard.tenant_id == tenant_id, m.InvCard.hoj_num == hoj_num)
     if exclude_id:
         stmt = stmt.where(m.InvCard.id != exclude_id)
@@ -644,12 +649,13 @@ def item_card_tables(db: Session, tenant_id: UUID, user_id: UUID) -> dict[str, A
 
 
 def save_hoja_captura_item_photo(
-    tenant_id: UUID, inv_num: str, slot: int, content: bytes, original_name: str
+    tenant_id: UUID, inv_num: int | str, slot: int, content: bytes, original_name: str
 ) -> str:
     from app.core.item_photo_storage import upload_item_photo
 
     _ = original_name
-    return upload_item_photo(tenant_id=tenant_id, inv_num=inv_num, slot=slot, content=content)
+    inv_label = format_inv_num(inv_num) if isinstance(inv_num, int) else str(inv_num)
+    return upload_item_photo(tenant_id=tenant_id, inv_num=inv_label, slot=slot, content=content)
 
 
 def _find_margesi_by_tipo(db: Session, tenant_id: UUID, valor: str, tipo: str) -> m.InvMargesiItem | None:
@@ -694,7 +700,10 @@ def _card_summary_for_inv_hoj(db: Session, tenant_id: UUID, inv_hoj: str | None)
     hoj = (inv_hoj or "").strip()
     if not hoj:
         return None
-    card = db.scalar(select(m.InvCard).where(m.InvCard.tenant_id == tenant_id, m.InvCard.hoj_num == hoj))
+    hoj_n = try_parse_inventory_number(hoj)
+    if hoj_n is None:
+        return {"hoj_num": hoj, "local": None, "ambiente": None}
+    card = db.scalar(select(m.InvCard).where(m.InvCard.tenant_id == tenant_id, m.InvCard.hoj_num == hoj_n))
     if not card:
         return {"hoj_num": hoj, "local": None, "ambiente": None}
     ambiente = db.get(m.InvEnvironment, card.id_ambiente) if card.id_ambiente else None
@@ -727,9 +736,12 @@ def record_margesi_cod(
         inv_hoj = row.inv_hoj
         card_label = inv_hoj
         if inv_hoj:
-            card = db.scalar(
-                select(m.InvCard).where(m.InvCard.tenant_id == tenant_id, m.InvCard.hoj_num == inv_hoj)
-            )
+            hoj_n = try_parse_inventory_number(inv_hoj)
+            card = None
+            if hoj_n is not None:
+                card = db.scalar(
+                    select(m.InvCard).where(m.InvCard.tenant_id == tenant_id, m.InvCard.hoj_num == hoj_n)
+                )
             if card:
                 card_label = f"{inv_hoj} (ID {card.id})"
         return {
@@ -774,18 +786,17 @@ def upsert_card(
         raise ValueError("El digitador es obligatorio")
 
     user = db.get(User, effective_digitador)
-    hoj_num_str = str(body.hoj_num or "").strip() or "0"
-    hoj_n = _parse_sheet_num(hoj_num_str)
+    hoj_n = _parse_sheet_num(body.hoj_num)
 
     data = body.model_dump(exclude={"id"})
     data["id_digitador"] = effective_digitador
-    data["hoj_num"] = hoj_num_str
+    data["hoj_num"] = hoj_n
 
     if body.id:
         row = db.get(m.InvCard, body.id)
         if not row or row.tenant_id != tenant_id:
             raise ValueError("Hoja no encontrada")
-        if _hoj_num_taken(db, tenant_id, hoj_num_str, exclude_id=body.id):
+        if _hoj_num_taken(db, tenant_id, hoj_n, exclude_id=body.id):
             raise ValueError("Número de hoja ya registrado")
         _validate_hoj_num_range(user, hoj_n)
         for k, v in data.items():
@@ -795,7 +806,7 @@ def upsert_card(
         db.refresh(row)
         return row
 
-    if _hoj_num_taken(db, tenant_id, hoj_num_str):
+    if _hoj_num_taken(db, tenant_id, hoj_n):
         raise ValueError("Número de hoja ya registrado")
     _validate_hoj_num_range(user, hoj_n)
 
@@ -818,6 +829,8 @@ def upsert_card(
 def list_cards(db: Session, tenant_id: UUID, q: RecordQuery, allowed_cols: set[str]) -> tuple[list[dict], int]:
     col = q.column if q.column in allowed_cols else "hoj_num"
     stmt = select(m.InvCard).where(m.InvCard.tenant_id == tenant_id)
+    if q.flag_firma is not None:
+        stmt = stmt.where(m.InvCard.flag_firma.is_(q.flag_firma))
     pattern = _search_like(q)
     if pattern is not None:
         env = m.InvEnvironment
@@ -827,7 +840,7 @@ def list_cards(db: Session, tenant_id: UUID, q: RecordQuery, allowed_cols: set[s
             .outerjoin(cc, (cc.id == m.InvCard.id_ccosto) & (cc.tenant_id == m.InvCard.tenant_id))
             .where(
                 or_(
-                    m.InvCard.hoj_num.ilike(pattern),
+                    cast(m.InvCard.hoj_num, String).ilike(pattern),
                     m.InvCard.nota_interna.ilike(pattern),
                     m.InvCard.nota_ficha.ilike(pattern),
                     env.code.ilike(pattern),
@@ -839,7 +852,14 @@ def list_cards(db: Session, tenant_id: UUID, q: RecordQuery, allowed_cols: set[s
             .distinct()
         )
     elif q.value not in (None, ""):
-        stmt = stmt.where(getattr(m.InvCard, col).ilike(f"%{q.value}%"))
+        if col == "hoj_num":
+            parsed = try_parse_inventory_number(q.value)
+            if parsed is not None:
+                stmt = stmt.where(m.InvCard.hoj_num == parsed)
+            else:
+                stmt = stmt.where(cast(m.InvCard.hoj_num, String).ilike(f"%{q.value}%"))
+        else:
+            stmt = stmt.where(getattr(m.InvCard, col).ilike(f"%{q.value}%"))
     order_col = q.column_ord or "hoj_num"
     if order_col not in allowed_cols | {"id", "created_at"}:
         order_col = "hoj_num"
@@ -894,7 +914,7 @@ def list_cards(db: Session, tenant_id: UUID, q: RecordQuery, allowed_cols: set[s
 
     out: list[dict[str, Any]] = []
     for r in rows:
-        d = row_to_dict(r)
+        d = inventory_row_dict(r)
         env = env_map.get(r.id_ambiente)
         if env:
             est = est_map.get(env.establishment_id)
@@ -931,10 +951,9 @@ def close_card(db: Session, tenant_id: UUID, card_id: int) -> tuple[bool, str]:
         return False, "Hoja no encontrada"
     if not row.flag_firma:
         return False, "Debe marcar el flag de firma antes de cerrar la hoja"
-    num = str(row.hoj_num).zfill(5)
-    row.hoj_num = num
-    row.pdf = f"HC-{num}.pdf"
-    row.pdf2 = f"FA-{num}.pdf"
+    num = int(row.hoj_num)
+    row.pdf = f"HC-{format_hoj_num(num)}.pdf"
+    row.pdf2 = f"FA-{format_hoj_num(num)}.pdf"
     row.state = 2
     db.add(row)
     db.commit()
@@ -951,7 +970,13 @@ def open_card(db: Session, tenant_id: UUID, card_id: int) -> tuple[bool, str]:
     return True, "Hoja de captura abierta."
 
 
-def _inv_num_in_use(db: Session, tenant_id: UUID, inv_num: str, exclude_id: int | None = None) -> bool:
+def build_hoja_captura_ficha_pdf(db: Session, tenant_id: UUID, card_id: int) -> tuple[bytes, str]:
+    from app.modules.inventory.hoja_captura_pdf import generate_ficha_pdf
+
+    return generate_ficha_pdf(db, tenant_id, card_id)
+
+
+def _inv_num_in_use(db: Session, tenant_id: UUID, inv_num: int, exclude_id: int | None = None) -> bool:
     stmt = select(m.InvItemCard.id).where(
         m.InvItemCard.tenant_id == tenant_id,
         m.InvItemCard.inv_num == inv_num,
@@ -962,8 +987,7 @@ def _inv_num_in_use(db: Session, tenant_id: UUID, inv_num: str, exclude_id: int 
 
 
 def _validate_card_item_fields(body: CardItemWrite) -> str | None:
-    inv = (body.inv_num or "").strip()
-    if not inv:
+    if body.inv_num is None:
         return "Número de inventario obligatorio"
     required = {
         "mar_col": body.mar_col,
@@ -971,7 +995,6 @@ def _validate_card_item_fields(body: CardItemWrite) -> str | None:
         "mar_mod": body.mar_mod,
         "mar_ser": body.mar_ser,
         "mar_med": body.mar_med,
-        "mar_des": body.mar_des,
     }
     labels = {
         "mar_col": "Color",
@@ -979,28 +1002,74 @@ def _validate_card_item_fields(body: CardItemWrite) -> str | None:
         "mar_mod": "Modelo",
         "mar_ser": "Serie",
         "mar_med": "Medidas",
-        "mar_des": "Descripción",
     }
+    if not body.id:
+        required["mar_des"] = body.mar_des
+        labels["mar_des"] = "Descripción"
     for key, val in required.items():
         if not (val and str(val).strip()):
             return f"{labels[key]} es obligatorio"
     return None
 
 
-def _bump_eti_act(user: User | None, inv_num: str | None) -> None:
-    if not user or not inv_num:
+def _bump_eti_act(user: User | None, inv_num: int | None) -> None:
+    if not user or inv_num is None:
         return
-    try:
-        user.eti_act = int(str(inv_num).strip()) + 1
-    except ValueError:
-        user.eti_act = int(user.eti_act or 0) + 1
+    user.eti_act = int(inv_num) + 1
 
 
-def _normalize_hoj_num(value: str | None) -> str:
-    s = str(value or "").strip()
-    if s.isdigit():
-        return str(int(s)).zfill(5)
-    return s
+def _log_item_registration(
+    db: Session,
+    *,
+    tenant_id: UUID,
+    user_id: UUID,
+    itemcard_id: int,
+    card_id: int,
+    inv_num: int | str | None = None,
+) -> None:
+    """Append-only: un INSERT en la misma transacción, sin consultas extra."""
+    db.add(
+        m.InvItemRegistrationLog(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            itemcard_id=itemcard_id,
+            card_id=card_id,
+            inv_num=format_inv_num(inv_num) if isinstance(inv_num, int) else inv_num,
+        )
+    )
+
+
+def _log_item_audit(
+    db: Session,
+    *,
+    tenant_id: UUID,
+    user_id: UUID | None,
+    action: str,
+    itemcard_id: int | None,
+    card_id: int,
+    inv_num: int | str | None = None,
+    mar_des: str | None = None,
+) -> None:
+    """Append-only: auditoría de bienes sin consultas extra."""
+    db.add(
+        m.InvItemAuditLog(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            action=action,
+            itemcard_id=itemcard_id,
+            card_id=card_id,
+            inv_num=format_inv_num(inv_num) if isinstance(inv_num, int) else inv_num,
+            mar_des=mar_des,
+        )
+    )
+
+
+def _normalize_hoj_num(value: int | str | None) -> str:
+    if value is None:
+        return format_hoj_num(0)
+    if isinstance(value, int):
+        return format_hoj_num(value)
+    return format_hoj_num(parse_inventory_number(value, field="Número de hoja", allow_empty=True))
 
 
 def _margesi_internal_code(row: m.InvMargesiItem) -> str | None:
@@ -1021,10 +1090,9 @@ def _link_item_to_margesi(
 ) -> None:
     """Marca conciliación inventario ↔ margesi (sin modificar ``mar_des`` del catálogo)."""
     hoj = _normalize_hoj_num(card.hoj_num)
-    card.hoj_num = hoj
-    inv = (ict.inv_num or "").strip()
-    if inv:
-        marg.inv_num = inv
+    inv = ict.inv_num
+    if inv is not None:
+        marg.inv_num = format_inv_num(inv)
     marg.inv_hoj = hoj
     marg.inv_sit = "C"
     marg.inv_con = "1"
@@ -1064,7 +1132,9 @@ def store_card_item(
     if err:
         return False, err
 
-    inv_num = (body.inv_num or "").strip()
+    inv_num = body.inv_num
+    if inv_num is None:
+        return False, "Número de inventario obligatorio"
     if _inv_num_in_use(db, tenant_id, inv_num, exclude_id=body.id):
         return False, "Número de inventario ya registrado"
 
@@ -1104,14 +1174,21 @@ def store_card_item(
         ict.inv_num = body.inv_num
         ict.inv_num_1 = body.inv_num_1
         ict.inv_num_2 = body.inv_num_2
+        was_sobrante = not ict.id_margesi and str(ict.inv_sit or "").strip().upper() == "S"
         if body.mar_num is not None and not ict.id_margesi:
             ict.mar_num = body.mar_num
-        if body.mar_des is not None and not ict.id_margesi:
-            ict.mar_des = body.mar_des
         if not ict.id_margesi:
-            base = body.mar_cpat if body.mar_cpat is not None else ict.mar_cpat
-            base = base or ""
-            ict.mar_cpat = f"{base}{body.mar_cpat_num or ''}"
+            if was_sobrante or body.no_conciliar:
+                if body.mar_cpat is not None:
+                    ict.mar_cpat = (body.mar_cpat or "").strip() or None
+                if body.mar_des is not None:
+                    ict.mar_des = (body.mar_des or "").strip() or None
+            elif body.mar_cpat is not None:
+                base = body.mar_cpat if body.mar_cpat is not None else ict.mar_cpat
+                base = base or ""
+                ict.mar_cpat = f"{base}{body.mar_cpat_num or ''}"
+                if body.mar_des is not None:
+                    ict.mar_des = (body.mar_des or "").strip() or None
         ict.extra = {**(ict.extra or {}), **patch_extra}
         if ict.id_margesi:
             marg = db.get(m.InvMargesiItem, ict.id_margesi)
@@ -1124,18 +1201,31 @@ def store_card_item(
                 mar_cpat_base = body.mar_cpat or marg.mar_cpat or ""
                 _link_item_to_margesi(card, ict, marg, mar_cpat=mar_cpat_base)
                 db.add(marg)
-        elif body.no_conciliar:
+        elif body.no_conciliar or was_sobrante:
             ict.inv_sit = "S"
             ict.inv_con = None
             ict.id_margesi = None
-        elif not ict.id_margesi and not body.id_margesi:
-            ict.inv_sit = "C"
         db.add(ict)
         db.add(card)
         if operator:
             _bump_eti_act(operator, inv_num)
             db.add(operator)
-        db.commit()
+        if operator_id:
+            _log_item_audit(
+                db,
+                tenant_id=tenant_id,
+                user_id=operator_id,
+                action="update",
+                itemcard_id=int(ict.id),
+                card_id=card_id,
+                inv_num=inv_num,
+                mar_des=ict.mar_des,
+            )
+        try:
+            db.commit()
+        except IntegrityError:
+            db.rollback()
+            return False, "Número de inventario ya registrado"
         return True, "Item modificado"
 
     mar_cpat_base = (body.mar_cpat or "").strip()
@@ -1182,6 +1272,26 @@ def store_card_item(
     db.add(ict)
     db.flush()
 
+    if operator_id:
+        _log_item_registration(
+            db,
+            tenant_id=tenant_id,
+            user_id=operator_id,
+            itemcard_id=int(ict.id),
+            card_id=card_id,
+            inv_num=inv_num or None,
+        )
+        _log_item_audit(
+            db,
+            tenant_id=tenant_id,
+            user_id=operator_id,
+            action="create",
+            itemcard_id=int(ict.id),
+            card_id=card_id,
+            inv_num=inv_num or None,
+            mar_des=item_des,
+        )
+
     if id_margesi and marg_row is not None:
         _link_item_to_margesi(card, ict, marg_row, mar_cpat=mar_cpat_base)
         db.add(marg_row)
@@ -1192,7 +1302,11 @@ def store_card_item(
     if operator:
         _bump_eti_act(operator, inv_num)
         db.add(operator)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        return False, "Número de inventario ya registrado"
     return True, "Item agregado"
 
 
@@ -1230,8 +1344,14 @@ def list_item_cards(db: Session, tenant_id: UUID, q: RecordQuery, allowed_cols: 
         order_col = "id"
     stmt = select(m.InvItemCard).where(m.InvItemCard.tenant_id == tenant_id)
 
+    if q.inv_sit_filter in ("C", "S"):
+        stmt = stmt.where(m.InvItemCard.inv_sit == q.inv_sit_filter)
+
     if q.column == "num_card" and q.value not in (None, ""):
-        card = db.scalar(select(m.InvCard).where(m.InvCard.tenant_id == tenant_id, m.InvCard.hoj_num == q.value))
+        hoj_n = try_parse_inventory_number(q.value)
+        card = None
+        if hoj_n is not None:
+            card = db.scalar(select(m.InvCard).where(m.InvCard.tenant_id == tenant_id, m.InvCard.hoj_num == hoj_n))
         if card:
             stmt = stmt.where(m.InvItemCard.id_card == card.id)
         else:
@@ -1244,7 +1364,14 @@ def list_item_cards(db: Session, tenant_id: UUID, q: RecordQuery, allowed_cols: 
         stmt = stmt.where(m.InvItemCard.id_card == cid)
     elif q.value not in (None, ""):
         col = q.column if q.column in allowed_cols else "inv_num"
-        stmt = stmt.where(getattr(m.InvItemCard, col).ilike(f"%{q.value}%"))
+        if col == "inv_num":
+            parsed = try_parse_inventory_number(q.value)
+            if parsed is not None:
+                stmt = stmt.where(m.InvItemCard.inv_num == parsed)
+            else:
+                stmt = stmt.where(cast(m.InvItemCard.inv_num, String).ilike(f"%{q.value}%"))
+        else:
+            stmt = stmt.where(getattr(m.InvItemCard, col).ilike(f"%{q.value}%"))
 
     stmt = stmt.order_by(_ord_clause(m.InvItemCard, order_col, q.ord_tipo))
     rows, total = _paged(db, stmt, q.page, q.per_page)
@@ -1257,7 +1384,7 @@ def list_item_cards(db: Session, tenant_id: UUID, q: RecordQuery, allowed_cols: 
             card_map[int(c.id)] = c.hoj_num
     out: list[dict[str, Any]] = []
     for r in rows:
-        d = row_to_dict(r)
+        d = inventory_row_dict(r)
         d["num_card"] = card_map.get(int(r.id_card))
         out.append(d)
     return out, total
@@ -1281,7 +1408,14 @@ def translate_item_card(db: Session, tenant_id: UUID, item_id: int, body: ItemCa
     return True, "Bien actualizado"
 
 
-def delete_item_card(db: Session, tenant_id: UUID, item_card_id: int, id_card: int) -> tuple[bool, str]:
+def delete_item_card(
+    db: Session,
+    tenant_id: UUID,
+    item_card_id: int,
+    id_card: int,
+    *,
+    operator_id: UUID | None = None,
+) -> tuple[bool, str]:
     """`BienesController::destroy` en transacción."""
     try:
         item = db.get(m.InvItemCard, item_card_id)
@@ -1299,6 +1433,17 @@ def delete_item_card(db: Session, tenant_id: UUID, item_card_id: int, id_card: i
                 marg.inv_sit = None
                 marg.inv_con = None
                 db.add(marg)
+        if operator_id:
+            _log_item_audit(
+                db,
+                tenant_id=tenant_id,
+                user_id=operator_id,
+                action="delete",
+                itemcard_id=item_card_id,
+                card_id=id_card,
+                inv_num=item.inv_num,
+                mar_des=item.mar_des,
+            )
         db.delete(item)
         db.add(card)
         db.commit()
@@ -1437,6 +1582,90 @@ def paged_meta(total: int, page: int, per_page: int) -> dict[str, int]:
     return {"total": total, "page": page, "per_page": per_page, "pages": pages}
 
 
+_ACTION_LABELS = {"create": "Creación", "update": "Edición", "delete": "Eliminación"}
+
+
+def list_item_audit_logs(
+    db: Session,
+    tenant_id: UUID,
+    q: AuditLogQuery,
+    allowed_cols: set[str],
+) -> tuple[list[dict[str, Any]], int]:
+    log = m.InvItemAuditLog
+    stmt = (
+        select(
+            log,
+            User.full_name.label("user_full_name"),
+            User.email.label("user_email"),
+            m.InvCard.hoj_num.label("hoj_num"),
+        )
+        .outerjoin(User, User.id == log.user_id)
+        .outerjoin(m.InvCard, m.InvCard.id == log.card_id)
+        .where(log.tenant_id == tenant_id)
+    )
+
+    if q.action in _ACTION_LABELS:
+        stmt = stmt.where(log.action == q.action)
+
+    if q.date_from:
+        stmt = stmt.where(log.created_at >= day_start_pe(q.date_from))
+    if q.date_to:
+        stmt = stmt.where(log.created_at <= day_end_pe(q.date_to))
+
+    like = _search_like(q)
+    if like:
+        stmt = stmt.where(
+            or_(
+                log.inv_num.ilike(like),
+                log.mar_des.ilike(like),
+                log.action.ilike(like),
+                User.full_name.ilike(like),
+                User.email.ilike(like),
+                cast(m.InvCard.hoj_num, String).ilike(like),
+            )
+        )
+    elif q.value not in (None, ""):
+        col = q.column if q.column in allowed_cols else "inv_num"
+        if col == "user_full_name":
+            stmt = stmt.where(User.full_name.ilike(f"%{q.value}%"))
+        elif col == "user_email":
+            stmt = stmt.where(User.email.ilike(f"%{q.value}%"))
+        elif col == "hoj_num":
+            parsed = try_parse_inventory_number(q.value)
+            if parsed is not None:
+                stmt = stmt.where(m.InvCard.hoj_num == parsed)
+            else:
+                stmt = stmt.where(cast(m.InvCard.hoj_num, String).ilike(f"%{q.value}%"))
+        elif hasattr(log, col):
+            stmt = stmt.where(getattr(log, col).ilike(f"%{q.value}%"))
+
+    order_col = q.column_ord or "created_at"
+    if order_col == "user_full_name":
+        stmt = stmt.order_by(_ord_clause(User, "full_name", q.ord_tipo))
+    elif order_col == "hoj_num":
+        stmt = stmt.order_by(_ord_clause(m.InvCard, "hoj_num", q.ord_tipo))
+    elif order_col in {"id", "created_at", "action", "inv_num", "mar_des", "itemcard_id", "card_id"}:
+        stmt = stmt.order_by(_ord_clause(log, order_col, q.ord_tipo))
+    else:
+        stmt = stmt.order_by(desc(log.created_at))
+
+    count_stmt = select(func.count()).select_from(stmt.order_by(None).subquery())
+    total = int(db.scalar(count_stmt) or 0)
+    rows = db.execute(stmt.offset((q.page - 1) * q.per_page).limit(q.per_page)).all()
+
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        rec = row[0]
+        d = row_to_dict(rec)
+        d["user_full_name"] = row.user_full_name
+        d["user_email"] = row.user_email
+        d["hoj_num"] = row.hoj_num
+        d["action_label"] = _ACTION_LABELS.get(str(rec.action), str(rec.action))
+        d["created_at_pe"] = format_datetime_pe(rec.created_at)
+        out.append(d)
+    return out, total
+
+
 _MONTH_LABELS = (
     "Ene",
     "Feb",
@@ -1503,6 +1732,26 @@ def _resolve_dashboard_range(
     if end < start:
         start, end = end, start
     return start, end
+
+
+# Baseline user_assigned_bienes: no aplica si «Desde» es posterior al 12/06/2026.
+_USER_ASSIGNED_BIENES_DESDE_CUTOFF = date(2026, 6, 12)
+
+
+def _include_user_assigned_bienes(
+    *,
+    date_from: date | None,
+    month: str | None,
+    range_start: date,
+) -> bool:
+    """Solo sumar asignaciones cuando la fecha «Desde» del filtro no supera el 12/06/2026."""
+    if month:
+        effective_from = range_start
+    elif date_from is not None:
+        effective_from = date_from
+    else:
+        effective_from = range_start
+    return effective_from <= _USER_ASSIGNED_BIENES_DESDE_CUTOFF
 
 
 def inventory_dashboard(
@@ -1577,4 +1826,138 @@ def inventory_dashboard(
             "margesi_total": sum(margesi_by_month.values()),
         },
         "by_month": by_month,
+    }
+
+
+def _user_registration_stats(
+    db: Session,
+    tenant_id: UUID,
+    *,
+    establishment_id: int | None = None,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    month: str | None = None,
+) -> dict[str, Any]:
+    range_start, range_end = _resolve_dashboard_range(date_from, date_to, month)
+    start_dt = _as_start(range_start)
+    end_dt = _as_end(range_end)
+
+    log_stmt = (
+        select(
+            m.InvItemRegistrationLog.user_id,
+            User.full_name,
+            User.email,
+            func.count(m.InvItemRegistrationLog.id).label("cnt"),
+        )
+        .select_from(m.InvItemRegistrationLog)
+        .outerjoin(User, User.id == m.InvItemRegistrationLog.user_id)
+        .where(
+            m.InvItemRegistrationLog.tenant_id == tenant_id,
+            m.InvItemRegistrationLog.created_at >= start_dt,
+            m.InvItemRegistrationLog.created_at <= end_dt,
+        )
+    )
+    if establishment_id:
+        log_stmt = (
+            log_stmt.join(m.InvCard, m.InvItemRegistrationLog.card_id == m.InvCard.id)
+            .join(m.InvEnvironment, m.InvCard.id_ambiente == m.InvEnvironment.id)
+            .where(m.InvEnvironment.establishment_id == establishment_id)
+        )
+    log_stmt = log_stmt.group_by(
+        m.InvItemRegistrationLog.user_id,
+        User.full_name,
+        User.email,
+    ).order_by(desc("cnt"))
+    log_rows = db.execute(log_stmt).all()
+
+    include_assigned = _include_user_assigned_bienes(
+        date_from=date_from,
+        month=month,
+        range_start=range_start,
+    )
+    assigned_map: dict[str, dict[str, Any]] = {}
+    if include_assigned:
+        assigned_rows = db.execute(
+            select(
+                m.InvUserAssignedBienes.user_id,
+                User.full_name,
+                User.email,
+                m.InvUserAssignedBienes.total_bienes,
+            )
+            .join(User, User.id == m.InvUserAssignedBienes.user_id)
+            .where(m.InvUserAssignedBienes.tenant_id == tenant_id)
+        ).all()
+        assigned_map = {
+            str(row.user_id): {
+                "full_name": row.full_name,
+                "email": row.email,
+                "assigned_bienes": int(row.total_bienes or 0),
+            }
+            for row in assigned_rows
+        }
+
+    merged: dict[str, dict[str, Any]] = {}
+    for row in log_rows:
+        uid = str(row.user_id) if row.user_id else None
+        if not uid:
+            continue
+        assigned = assigned_map.get(uid, {})
+        registered = int(row.cnt)
+        assigned_bienes = int(assigned.get("assigned_bienes", 0))
+        merged[uid] = {
+            "user_id": uid,
+            "full_name": row.full_name or assigned.get("full_name"),
+            "email": row.email or assigned.get("email"),
+            "total": registered + assigned_bienes,
+        }
+
+    for uid, assigned in assigned_map.items():
+        if uid not in merged:
+            merged[uid] = {
+                "user_id": uid,
+                "full_name": assigned.get("full_name"),
+                "email": assigned.get("email"),
+                "total": int(assigned.get("assigned_bienes", 0)),
+            }
+
+    by_user = sorted(merged.values(), key=lambda u: u["total"], reverse=True)
+
+    return {
+        "total": sum(u["total"] for u in by_user),
+        "by_user": by_user,
+    }
+
+
+def inventory_user_registrations(
+    db: Session,
+    tenant_id: UUID,
+    establishment_id: int | None = None,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    month: str | None = None,
+) -> dict[str, Any]:
+    return _user_registration_stats(
+        db,
+        tenant_id,
+        establishment_id=establishment_id,
+        date_from=date_from,
+        date_to=date_to,
+        month=month,
+    )
+
+
+def get_reporte_aptot_cache_meta(db: Session, tenant_id: UUID) -> dict[str, Any]:
+    row = db.get(m.InvReporteAptotCacheMeta, tenant_id)
+    if row is None:
+        return {
+            "status": "pending",
+            "row_count": 0,
+            "refreshed_at": None,
+            "message": "Cache aún no generado",
+        }
+    return {
+        "status": row.status,
+        "row_count": int(row.row_count or 0),
+        "refreshed_at": row.refreshed_at.isoformat() if row.refreshed_at else None,
+        "message": row.message or "",
     }

@@ -11,6 +11,8 @@ from app.modules.iam.models import Role, RoleComponent, UIComponent, User
 from app.modules.iam.repository import RoleRepository, UserRepository
 from app.modules.iam.schemas import (
     ComponentPermissions,
+    PagedMeta,
+    PagedUserRows,
     RoleCreate,
     RolePermissionRow,
     RolePermissionsWrite,
@@ -18,6 +20,7 @@ from app.modules.iam.schemas import (
     UIComponentOut,
     UserComponentOut,
     UserCreate,
+    UserOut,
     UserUpdate,
 )
 from app.shared.utils.strings import normalize_email
@@ -40,6 +43,32 @@ class UserService:
 
     def list_users(self, tenant_id: UUID) -> list[User]:
         return self.repo.list_by_tenant(tenant_id)
+
+    @staticmethod
+    def _paged_meta(total: int, page: int, per_page: int) -> PagedMeta:
+        pages = max(1, (total + per_page - 1) // per_page) if per_page > 0 else 1
+        return PagedMeta(total=total, page=page, per_page=per_page, pages=pages)
+
+    def list_users_paged(
+        self,
+        tenant_id: UUID,
+        *,
+        page: int = 1,
+        per_page: int = 15,
+        search: str | None = None,
+    ) -> PagedUserRows:
+        page = max(1, page)
+        per_page = min(max(1, per_page), 200)
+        rows, total = self.repo.list_by_tenant_paged(
+            tenant_id,
+            page=page,
+            per_page=per_page,
+            search=search,
+        )
+        return PagedUserRows(
+            data=[UserOut.model_validate(u) for u in rows],
+            meta=self._paged_meta(total, page, per_page),
+        )
 
     def get_user(self, tenant_id: UUID, user_id: UUID) -> User:
         u = self.repo.get(tenant_id, user_id)

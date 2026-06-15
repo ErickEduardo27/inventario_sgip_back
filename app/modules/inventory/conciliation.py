@@ -5,10 +5,12 @@ from __future__ import annotations
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import exists, func, or_, select
+from sqlalchemy import String, cast, exists, func, or_, select
 from sqlalchemy.orm import Session
 
+from app.core.inventory_numbers import format_inv_num, try_parse_inventory_number
 from app.modules.inventory import models as m
+from app.modules.inventory.reporte_aptot_cache import schedule_reporte_aptot_cache_refresh
 from app.modules.inventory.schemas import (
     ConciliationFilters,
     ImportConciliationRow,
@@ -18,6 +20,20 @@ from app.modules.inventory.service import _ord_clause, _paged, paged_meta, row_t
 
 def _extra_dict(raw: Any) -> dict[str, Any]:
     return raw if isinstance(raw, dict) else {}
+
+
+def _filter_hoj_num(col: Any, raw: str) -> Any:
+    parsed = try_parse_inventory_number(raw)
+    if parsed is not None:
+        return col == parsed
+    return cast(col, String).ilike(f"%{raw}%")
+
+
+def _filter_inv_num(col: Any, raw: str) -> Any:
+    parsed = try_parse_inventory_number(raw)
+    if parsed is not None:
+        return col == parsed
+    return cast(col, String).ilike(f"%{raw}%")
 
 
 def _extra_text(col: Any, key: str) -> Any:
@@ -223,10 +239,10 @@ def list_pending_bienes(
     )
     if f.numero_hoja:
         stmt = stmt.join(m.InvCard, m.InvItemCard.id_card == m.InvCard.id).where(
-            m.InvCard.hoj_num.ilike(f"%{f.numero_hoja}%")
+            _filter_hoj_num(m.InvCard.hoj_num, f.numero_hoja)
         )
     if f.numero_inv:
-        stmt = stmt.where(m.InvItemCard.inv_num.ilike(f"%{f.numero_inv}%"))
+        stmt = stmt.where(_filter_inv_num(m.InvItemCard.inv_num, f.numero_inv))
     if f.codigo_sbn:
         stmt = stmt.where(m.InvItemCard.mar_cpat.ilike(f"%{f.codigo_sbn}%"))
     if f.descripcion:
@@ -265,10 +281,10 @@ def list_conciliated_bienes(
     )
     if f.numero_hoja:
         stmt = stmt.join(m.InvCard, m.InvItemCard.id_card == m.InvCard.id).where(
-            m.InvCard.hoj_num.ilike(f"%{f.numero_hoja}%")
+            _filter_hoj_num(m.InvCard.hoj_num, f.numero_hoja)
         )
     if f.numero_inv:
-        stmt = stmt.where(m.InvItemCard.inv_num.ilike(f"%{f.numero_inv}%"))
+        stmt = stmt.where(_filter_inv_num(m.InvItemCard.inv_num, f.numero_inv))
     if f.codigo_sbn:
         stmt = stmt.where(m.InvItemCard.mar_cpat.ilike(f"%{f.codigo_sbn}%"))
     if f.descripcion:
@@ -308,10 +324,10 @@ def list_no_conciliables(
     )
     if f.numero_hoja:
         stmt = stmt.join(m.InvCard, m.InvItemCard.id_card == m.InvCard.id).where(
-            m.InvCard.hoj_num.ilike(f"%{f.numero_hoja}%")
+            _filter_hoj_num(m.InvCard.hoj_num, f.numero_hoja)
         )
     if f.numero_inv:
-        stmt = stmt.where(m.InvItemCard.inv_num.ilike(f"%{f.numero_inv}%"))
+        stmt = stmt.where(_filter_inv_num(m.InvItemCard.inv_num, f.numero_inv))
     if f.codigo_sbn:
         stmt = stmt.where(m.InvItemCard.mar_cpat.ilike(f"%{f.codigo_sbn}%"))
     if f.descripcion:
@@ -405,10 +421,10 @@ def list_no_conciliation_bienes(
         stmt = stmt.where(m.InvItemCard.id_margesi.is_(None))
     if f.numero_hoja:
         stmt = stmt.join(m.InvCard, m.InvItemCard.id_card == m.InvCard.id).where(
-            m.InvCard.hoj_num.ilike(f"%{f.numero_hoja}%")
+            _filter_hoj_num(m.InvCard.hoj_num, f.numero_hoja)
         )
     if f.numero_inv:
-        stmt = stmt.where(m.InvItemCard.inv_num.ilike(f"%{f.numero_inv}%"))
+        stmt = stmt.where(_filter_inv_num(m.InvItemCard.inv_num, f.numero_inv))
     if f.codigo_sbn:
         stmt = stmt.where(m.InvItemCard.mar_cpat.ilike(f"%{f.codigo_sbn}%"))
     if f.descripcion:
@@ -460,10 +476,10 @@ def list_desconciliacion_sbn_bienes(
     )
     if f.numero_hoja:
         stmt = stmt.join(m.InvCard, m.InvItemCard.id_card == m.InvCard.id).where(
-            m.InvCard.hoj_num.ilike(f"%{f.numero_hoja}%")
+            _filter_hoj_num(m.InvCard.hoj_num, f.numero_hoja)
         )
     if f.numero_inv:
-        stmt = stmt.where(m.InvItemCard.inv_num.ilike(f"%{f.numero_inv}%"))
+        stmt = stmt.where(_filter_inv_num(m.InvItemCard.inv_num, f.numero_inv))
     if f.codigo_sbn:
         stmt = stmt.where(m.InvItemCard.mar_cpat.ilike(f"%{f.codigo_sbn}%"))
     if f.descripcion:
@@ -521,7 +537,7 @@ def conciliar_pair(
         if mar_num:
             extra["mar_npri"] = mar_num
 
-        marg.inv_num = bien.inv_num
+        marg.inv_num = format_inv_num(bien.inv_num)
         marg.inv_sit = "C"
         marg.inv_con = inv_con
         marg.inv_hoj = inv_hoj if inv_hoj is not None else "1"
@@ -535,6 +551,7 @@ def conciliar_pair(
         db.add(marg)
         db.add(bien)
         db.commit()
+        schedule_reporte_aptot_cache_refresh(tenant_id)
         return True, "Bienes conciliados"
     except Exception:  # noqa: BLE001
         db.rollback()
@@ -575,7 +592,7 @@ def conciliar_pair_sbn(
         if mar_num:
             extra["mar_npri"] = mar_num
 
-        marg.inv_num = bien.inv_num
+        marg.inv_num = format_inv_num(bien.inv_num)
         marg.inv_sit = "C"
         marg.inv_con = "1"
         marg.inv_hoj = numero_hoja.strip() or None
@@ -590,6 +607,7 @@ def conciliar_pair_sbn(
         db.add(marg)
         db.add(bien)
         db.commit()
+        schedule_reporte_aptot_cache_refresh(tenant_id)
         return True, "Bienes conciliados (SBN)"
     except Exception:  # noqa: BLE001
         db.rollback()
@@ -624,6 +642,7 @@ def desconciliar_item(db: Session, tenant_id: UUID, item_id: int) -> tuple[bool,
         db.add(marg)
         db.add(bien)
         db.commit()
+        schedule_reporte_aptot_cache_refresh(tenant_id)
         return True, "Bienes desconciliados"
     except Exception:  # noqa: BLE001
         db.rollback()
@@ -666,6 +685,7 @@ def desconciliar_pair_sbn(
         db.add(marg)
         db.add(bien)
         db.commit()
+        schedule_reporte_aptot_cache_refresh(tenant_id)
         return True, "Bienes desconciliados (SBN)"
     except Exception:  # noqa: BLE001
         db.rollback()
@@ -709,6 +729,7 @@ def mark_no_conciliable_entity(
         else:
             return False, "Tipo de registro no válido."
         db.commit()
+        schedule_reporte_aptot_cache_refresh(tenant_id)
         return True, "Registro marcado como no conciliable"
     except Exception:  # noqa: BLE001
         db.rollback()
@@ -742,6 +763,7 @@ def mark_conciliable_entity(
         else:
             return False, "Tipo de registro no válido."
         db.commit()
+        schedule_reporte_aptot_cache_refresh(tenant_id)
         return True, "Registro habilitado para conciliación"
     except Exception:  # noqa: BLE001
         db.rollback()
@@ -829,14 +851,17 @@ def import_no_conciliable_rows(
                     db, tenant_id, "margesi", int(marg.id), observacion
                 )
         if not ok and inv_num:
-            bien = db.scalar(
-                select(m.InvItemCard).where(
-                    m.InvItemCard.tenant_id == tenant_id,
-                    m.InvItemCard.inv_num == inv_num.strip(),
-                    m.InvItemCard.id_margesi.is_(None),
-                    m.InvItemCard.inv_sit == "S",
+            inv_n = try_parse_inventory_number(inv_num)
+            bien = None
+            if inv_n is not None:
+                bien = db.scalar(
+                    select(m.InvItemCard).where(
+                        m.InvItemCard.tenant_id == tenant_id,
+                        m.InvItemCard.inv_num == inv_n,
+                        m.InvItemCard.id_margesi.is_(None),
+                        m.InvItemCard.inv_sit == "S",
+                    )
                 )
-            )
             if bien:
                 ok, msg = mark_no_conciliable_entity(
                     db, tenant_id, "bien", int(bien.id), observacion
@@ -893,14 +918,17 @@ def match_import_conciliation(
             margesi_id = int(marg.id)
 
     if inv_num:
-        bien = db.scalar(
-            select(m.InvItemCard).where(
-                m.InvItemCard.tenant_id == tenant_id,
-                m.InvItemCard.id_margesi.is_(None),
-                m.InvItemCard.inv_num == inv_num.strip(),
-                m.InvItemCard.inv_sit == "S",
+        inv_n = try_parse_inventory_number(inv_num)
+        bien = None
+        if inv_n is not None:
+            bien = db.scalar(
+                select(m.InvItemCard).where(
+                    m.InvItemCard.tenant_id == tenant_id,
+                    m.InvItemCard.id_margesi.is_(None),
+                    m.InvItemCard.inv_num == inv_n,
+                    m.InvItemCard.inv_sit == "S",
+                )
             )
-        )
         if bien:
             bien_id = int(bien.id)
 

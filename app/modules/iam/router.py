@@ -1,6 +1,6 @@
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user, get_tenant_id
@@ -15,6 +15,7 @@ from app.modules.iam.schemas import (
     RolePermissionsWrite,
     RoleUpdate,
     UIComponentOut,
+    PagedUserRows,
     UserComponentOut,
     UserCreate,
     UserOut,
@@ -36,6 +37,18 @@ def list_users(
     _user: User = Depends(require_profile_admin),
 ):
     return UserService(db).list_users(tenant_id)
+
+
+@router.get("/users/records", response_model=PagedUserRows)
+def list_users_paged(
+    db: Session = Depends(get_db),
+    tenant_id: UUID = Depends(get_tenant_id),
+    _user: User = Depends(require_profile_admin),
+    page: int = Query(1, ge=1),
+    per_page: int = Query(15, ge=1, le=200),
+    search: str | None = Query(None),
+):
+    return UserService(db).list_users_paged(tenant_id, page=page, per_page=per_page, search=search)
 
 
 @router.get("/users/{user_id}", response_model=UserOut)

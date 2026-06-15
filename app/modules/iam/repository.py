@@ -1,9 +1,14 @@
 from uuid import UUID
 
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app.modules.iam.models import Role, User
+
+
+def _user_search_pattern(search: str | None) -> str | None:
+    q = (search or "").strip()
+    return f"%{q}%" if q else None
 
 
 class UserRepository:
@@ -16,6 +21,36 @@ class UserRepository:
                 select(User).where(User.tenant_id == tenant_id, User.is_deleted.is_(False)).order_by(User.full_name)
             ).all()
         )
+
+    def list_by_tenant_paged(
+        self,
+        tenant_id: UUID,
+        *,
+        page: int,
+        per_page: int,
+        search: str | None = None,
+    ) -> tuple[list[User], int]:
+        filters = [User.tenant_id == tenant_id, User.is_deleted.is_(False)]
+        pattern = _user_search_pattern(search)
+        if pattern:
+            filters.append(
+                or_(
+                    User.full_name.ilike(pattern),
+                    User.email.ilike(pattern),
+                    User.status.ilike(pattern),
+                )
+            )
+        total = int(self.db.scalar(select(func.count(User.id)).where(*filters)) or 0)
+        rows = list(
+            self.db.scalars(
+                select(User)
+                .where(*filters)
+                .order_by(User.full_name)
+                .offset(max(0, (page - 1) * per_page))
+                .limit(per_page)
+            ).all()
+        )
+        return rows, total
 
     def get(self, tenant_id: UUID, user_id: UUID) -> User | None:
         return self.db.scalar(

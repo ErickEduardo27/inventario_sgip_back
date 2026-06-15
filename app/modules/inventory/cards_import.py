@@ -21,6 +21,7 @@ from uuid import UUID
 import pandas as pd
 from sqlalchemy.orm import Session
 
+from app.core.inventory_numbers import parse_inventory_number
 from app.modules.inventory.bulk_copy import copy_csv_to_temp, csv_cell as _csv_cell
 
 _IMPORT_FIELD_NAMES = (
@@ -124,11 +125,16 @@ def bulk_import_cards(
         if not hoj_num or not hoj_fec or not env_code or not cc_code or not inv_number:
             skipped_invalid += 1
             continue
+        try:
+            hoj_key = str(parse_inventory_number(hoj_num, field="Número de hoja"))
+        except ValueError:
+            skipped_invalid += 1
+            continue
         valid_row_count += 1
         person_doc = _optional_person_document(row.get("person_document"))
         dig_number = _cell_str(row.get("digitador_number"))
-        staging_by_hoj[hoj_num[:50]] = [
-            hoj_num[:50],
+        staging_by_hoj[hoj_key] = [
+            hoj_key,
             hoj_fec,
             env_code[:100],
             cc_code[:100],
@@ -261,7 +267,7 @@ def bulk_import_cards(
                 )
                 SELECT
                     %s::uuid,
-                    r.hoj_num,
+                    NULLIF(regexp_replace(trim(r.hoj_num), '[^0-9]', '', 'g'), '')::bigint,
                     r.hoj_fec,
                     r.id_ambiente,
                     r.id_ccosto,
