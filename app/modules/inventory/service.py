@@ -9,7 +9,7 @@ from datetime import date, datetime, time, timezone
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import asc, desc, exists, func, or_, select
+from sqlalchemy import asc, desc, exists, func, or_, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -35,6 +35,7 @@ from app.modules.inventory.schemas import (
     EstablishmentWrite,
     InventoryNumWrite,
     ItemCardTranslate,
+    ItemPhotoQuery,
     ListSbnWrite,
     MargesiWrite,
     PersonWrite,
@@ -225,6 +226,11 @@ def upsert_establishment(db: Session, tenant_id: UUID, body: EstablishmentWrite)
         db.add(row)
         db.commit()
         db.refresh(row)
+        from app.modules.inventory.dashboard_establishment_stats_cache import (
+            schedule_dashboard_establishment_stats_refresh,
+        )
+
+        schedule_dashboard_establishment_stats_refresh(tenant_id, [int(row.id)])
         return row
     data = body.model_dump(exclude=_PHOTO_WRITE_EXCLUDE)
     row = m.InvEstablishment(tenant_id=tenant_id, **data)
@@ -232,6 +238,11 @@ def upsert_establishment(db: Session, tenant_id: UUID, body: EstablishmentWrite)
     db.add(row)
     db.commit()
     db.refresh(row)
+    from app.modules.inventory.dashboard_establishment_stats_cache import (
+        schedule_dashboard_establishment_stats_refresh,
+    )
+
+    schedule_dashboard_establishment_stats_refresh(tenant_id, [int(row.id)])
     return row
 
 
@@ -763,6 +774,17 @@ def record_margesi_cod(
                 )
             if card:
                 card_label = f"{inv_hoj} (ID {card.id})"
+        card_info = _card_summary_for_inv_hoj(db, tenant_id, inv_hoj) or {
+            "hoj_num": inv_hoj,
+            "local": None,
+            "ambiente": None,
+        }
+        inv_raw = row.inv_num
+        if inv_raw is not None and str(inv_raw).strip():
+            card_info = {
+                **card_info,
+                "inv_num": format_inv_num(inv_raw) if isinstance(inv_raw, int) else str(inv_raw).strip(),
+            }
         return {
             "success": True,
             "message": f"El bien ya está inventariado en la hoja {card_label or inv_hoj or '—'}",
@@ -771,7 +793,7 @@ def record_margesi_cod(
             "id_margesi": row.id,
             "inv_num_sugerido": inv_sugerido,
             "item": _margesi_to_lookup_item(row),
-            "card_info": _card_summary_for_inv_hoj(db, tenant_id, inv_hoj),
+            "card_info": card_info,
         }
 
     return {
@@ -818,11 +840,26 @@ def upsert_card(
         if _hoj_num_taken(db, tenant_id, hoj_n, exclude_id=body.id):
             raise ValueError("Número de hoja ya registrado")
         _validate_hoj_num_range(user, hoj_n)
+        old_ambiente_id = row.id_ambiente
         for k, v in data.items():
             setattr(row, k, v)
         db.add(row)
         db.commit()
         db.refresh(row)
+        from app.modules.inventory.dashboard_establishment_stats_cache import (
+            schedule_dashboard_establishment_stats_refresh,
+        )
+
+        est_ids: list[int] = []
+        if row.id_ambiente:
+            new_env = db.get(m.InvEnvironment, row.id_ambiente)
+            if new_env and new_env.establishment_id:
+                est_ids.append(int(new_env.establishment_id))
+        if old_ambiente_id and old_ambiente_id != row.id_ambiente:
+            old_env = db.get(m.InvEnvironment, old_ambiente_id)
+            if old_env and old_env.establishment_id:
+                est_ids.append(int(old_env.establishment_id))
+        schedule_dashboard_establishment_stats_refresh(tenant_id, est_ids)
         return row
 
     if _hoj_num_taken(db, tenant_id, hoj_n):
@@ -842,6 +879,15 @@ def upsert_card(
 
     db.commit()
     db.refresh(row)
+    from app.modules.inventory.dashboard_establishment_stats_cache import (
+        establishment_ids_for_card,
+        schedule_dashboard_establishment_stats_refresh,
+    )
+
+    schedule_dashboard_establishment_stats_refresh(
+        tenant_id,
+        establishment_ids_for_card(db, tenant_id, int(row.id)),
+    )
     return row
 
 
@@ -989,6 +1035,102 @@ def build_hoja_captura_ficha_pdf(db: Session, tenant_id: UUID, card_id: int) -> 
     from app.modules.inventory.hoja_captura_pdf import generate_ficha_pdf
 
     return generate_ficha_pdf(db, tenant_id, card_id)
+
+
+MAX_HOJA_CAPTURA_BULK_PDF = 150
+
+
+def _card_ids_for_bulk_ficha_pdf(
+    db: Session,
+    tenant_id: UUID,
+    *,
+    mode: str,
+    hoj_num_from: int | None,
+    hoj_num_to: int | None,
+    establishment_id: int | None,
+) -> list[int]:
+    if mode == "range":
+        if hoj_num_from is None or hoj_num_to is None:
+            raise ValueError("Indique número inicial y final de hoja")
+        if hoj_num_from > hoj_num_to:
+            raise ValueError("El número inicial no puede ser mayor que el final")
+        stmt = (
+            select(m.InvCard.id)
+            .where(
+                m.InvCard.tenant_id == tenant_id,
+                m.InvCard.hoj_num >= hoj_num_from,
+                m.InvCard.hoj_num <= hoj_num_to,
+            )
+            .order_by(m.InvCard.hoj_num.asc())
+        )
+    elif mode == "local":
+        if not establishment_id:
+            raise ValueError("Seleccione un local")
+        stmt = (
+            select(m.InvCard.id)
+            .join(
+                m.InvEnvironment,
+                (m.InvEnvironment.id == m.InvCard.id_ambiente)
+                & (m.InvEnvironment.tenant_id == m.InvCard.tenant_id),
+            )
+            .where(
+                m.InvCard.tenant_id == tenant_id,
+                m.InvEnvironment.establishment_id == establishment_id,
+            )
+            .order_by(m.InvCard.hoj_num.asc())
+        )
+    else:
+        raise ValueError("Modo de descarga no válido")
+
+    return list(db.scalars(stmt).all())
+
+
+def build_hoja_captura_bulk_ficha_pdf(
+    db: Session,
+    tenant_id: UUID,
+    *,
+    mode: str,
+    hoj_num_from: int | None = None,
+    hoj_num_to: int | None = None,
+    establishment_id: int | None = None,
+) -> tuple[bytes, str]:
+    from app.modules.inventory.hoja_captura_pdf import generate_ficha_pdf, merge_pdf_documents
+
+    card_ids = _card_ids_for_bulk_ficha_pdf(
+        db,
+        tenant_id,
+        mode=mode,
+        hoj_num_from=hoj_num_from,
+        hoj_num_to=hoj_num_to,
+        establishment_id=establishment_id,
+    )
+    if not card_ids:
+        raise ValueError("No se encontraron hojas para los criterios indicados")
+    if len(card_ids) > MAX_HOJA_CAPTURA_BULK_PDF:
+        raise ValueError(
+            f"Máximo {MAX_HOJA_CAPTURA_BULK_PDF} hojas por descarga. Acorte el rango o filtre por local."
+        )
+
+    parts: list[bytes] = []
+    for card_id in card_ids:
+        pdf_bytes, _ = generate_ficha_pdf(db, tenant_id, card_id)
+        parts.append(pdf_bytes)
+
+    merged = merge_pdf_documents(parts)
+
+    if mode == "range":
+        filename = f"fichas_hojas_{hoj_num_from}-{hoj_num_to}.pdf"
+    else:
+        est = db.scalar(
+            select(m.InvEstablishment.code).where(
+                m.InvEstablishment.tenant_id == tenant_id,
+                m.InvEstablishment.id == establishment_id,
+            )
+        )
+        code = (est or str(establishment_id)).strip() or str(establishment_id)
+        filename = f"fichas_local_{code}.pdf"
+
+    return merged, filename
 
 
 def _inv_num_in_use(db: Session, tenant_id: UUID, inv_num: int, exclude_id: int | None = None) -> bool:
@@ -1241,6 +1383,17 @@ def store_card_item(
         except IntegrityError:
             db.rollback()
             return False, "Número de inventario ya registrado"
+        from app.modules.inventory.dashboard_establishment_stats_cache import (
+            schedule_dashboard_stats_after_card_item_change,
+        )
+
+        linked_marg = db.get(m.InvMargesiItem, ict.id_margesi) if ict.id_margesi else None
+        schedule_dashboard_stats_after_card_item_change(
+            db,
+            tenant_id,
+            card_id=card_id,
+            margesi_row=linked_marg,
+        )
         return True, "Item modificado"
 
     mar_cpat_base = (body.mar_cpat or "").strip()
@@ -1322,6 +1475,16 @@ def store_card_item(
     except IntegrityError:
         db.rollback()
         return False, "Número de inventario ya registrado"
+    from app.modules.inventory.dashboard_establishment_stats_cache import (
+        schedule_dashboard_stats_after_card_item_change,
+    )
+
+    schedule_dashboard_stats_after_card_item_change(
+        db,
+        tenant_id,
+        card_id=card_id,
+        margesi_row=marg_row,
+    )
     return True, "Item agregado"
 
 
@@ -1361,6 +1524,48 @@ def list_item_cards(db: Session, tenant_id: UUID, q: RecordQuery, allowed_cols: 
 
     if q.inv_sit_filter in ("C", "S"):
         stmt = stmt.where(m.InvItemCard.inv_sit == q.inv_sit_filter)
+
+    if q.establishment_id is not None:
+        stmt = stmt.where(
+            exists(
+                select(1)
+                .select_from(m.InvCard)
+                .join(
+                    m.InvEnvironment,
+                    (m.InvEnvironment.id == m.InvCard.id_ambiente)
+                    & (m.InvEnvironment.tenant_id == m.InvCard.tenant_id),
+                )
+                .where(
+                    m.InvCard.id == m.InvItemCard.id_card,
+                    m.InvCard.tenant_id == m.InvItemCard.tenant_id,
+                    m.InvEnvironment.establishment_id == q.establishment_id,
+                )
+            )
+        )
+    else:
+        local_code = (q.local_code or "").strip()
+        if local_code:
+            stmt = stmt.where(
+                exists(
+                    select(1)
+                    .select_from(m.InvCard)
+                    .join(
+                        m.InvEnvironment,
+                        (m.InvEnvironment.id == m.InvCard.id_ambiente)
+                        & (m.InvEnvironment.tenant_id == m.InvCard.tenant_id),
+                    )
+                    .join(
+                        m.InvEstablishment,
+                        (m.InvEstablishment.id == m.InvEnvironment.establishment_id)
+                        & (m.InvEstablishment.tenant_id == m.InvEnvironment.tenant_id),
+                    )
+                    .where(
+                        m.InvCard.id == m.InvItemCard.id_card,
+                        m.InvCard.tenant_id == m.InvItemCard.tenant_id,
+                        m.InvEstablishment.code == local_code,
+                    )
+                )
+            )
 
     if q.column == "num_card" and q.value not in (None, ""):
         hoj_n = try_parse_inventory_number(q.value)
@@ -1416,6 +1621,16 @@ def translate_item_card(db: Session, tenant_id: UUID, item_id: int, body: ItemCa
     db.add(new)
     db.add(rec)
     db.commit()
+    from app.modules.inventory.dashboard_establishment_stats_cache import (
+        schedule_dashboard_stats_after_item_move,
+    )
+
+    schedule_dashboard_stats_after_item_move(
+        db,
+        tenant_id,
+        old_card_id=int(body.id_card_old),
+        new_card_id=int(body.id_card),
+    )
     return True, "Bien actualizado"
 
 
@@ -1436,6 +1651,7 @@ def delete_item_card(
         if item.id_card != id_card:
             return False, "El bien no pertenece a la hoja indicada"
         card.hoj_can_tot = max(0, int(card.hoj_can_tot or 0) - 1)
+        linked_marg: m.InvMargesiItem | None = None
         if item.id_margesi:
             marg = db.get(m.InvMargesiItem, item.id_margesi)
             if marg and marg.tenant_id == tenant_id:
@@ -1444,6 +1660,7 @@ def delete_item_card(
                 marg.inv_sit = None
                 marg.inv_con = None
                 db.add(marg)
+                linked_marg = marg
         if operator_id:
             _log_item_audit(
                 db,
@@ -1458,6 +1675,16 @@ def delete_item_card(
         db.delete(item)
         db.add(card)
         db.commit()
+        from app.modules.inventory.dashboard_establishment_stats_cache import (
+            schedule_dashboard_stats_after_card_item_change,
+        )
+
+        schedule_dashboard_stats_after_card_item_change(
+            db,
+            tenant_id,
+            card_id=id_card,
+            margesi_row=linked_marg,
+        )
         return True, "Bien eliminado con éxito"
     except Exception as e:  # noqa: BLE001
         db.rollback()
@@ -1541,6 +1768,15 @@ def upsert_margesi(db: Session, tenant_id: UUID, body: MargesiWrite) -> m.InvMar
             _bump_list_sbn_cat_ulti_from_margesi(db, tenant_id, row)
             db.commit()
             db.refresh(row)
+            from app.modules.inventory.dashboard_establishment_stats_cache import (
+                establishment_ids_for_margesi,
+                schedule_dashboard_establishment_stats_refresh,
+            )
+
+            schedule_dashboard_establishment_stats_refresh(
+                tenant_id,
+                establishment_ids_for_margesi(db, tenant_id, row),
+            )
             return row
         row = m.InvMargesiItem(tenant_id=tenant_id)
         apply_write_payload(row, data)
@@ -1548,15 +1784,46 @@ def upsert_margesi(db: Session, tenant_id: UUID, body: MargesiWrite) -> m.InvMar
         _bump_list_sbn_cat_ulti_from_margesi(db, tenant_id, row)
         db.commit()
         db.refresh(row)
+        from app.modules.inventory.dashboard_establishment_stats_cache import (
+            establishment_ids_for_margesi,
+            schedule_dashboard_establishment_stats_refresh,
+        )
+
+        schedule_dashboard_establishment_stats_refresh(
+            tenant_id,
+            establishment_ids_for_margesi(db, tenant_id, row),
+        )
         return row
     except Exception:
         db.rollback()
         raise
 
 
+_MARGESI_FALTANTE_INV_SIT = frozenset({"-", "—", "–"})
+
+
+def _margesi_faltantes_inv_sit_clause():
+    """Faltantes: sin situación de inventario (NULL/vacío) o guión en ``inv_sit``."""
+    return or_(
+        m.InvMargesiItem.inv_sit.is_(None),
+        func.trim(m.InvMargesiItem.inv_sit) == "",
+        m.InvMargesiItem.inv_sit.in_(_MARGESI_FALTANTE_INV_SIT),
+    )
+
+
 def list_margesi(db: Session, tenant_id: UUID, q: RecordQuery, allowed_cols: set[str]) -> tuple[list[dict], int]:
     col = q.column if q.column in allowed_cols else "mar_cpat"
     stmt = select(m.InvMargesiItem).where(m.InvMargesiItem.tenant_id == tenant_id)
+    if q.inv_sit_filter == "C":
+        stmt = stmt.where(m.InvMargesiItem.inv_sit == "C")
+    elif q.inv_sit_filter in ("F", "S"):
+        # F = faltantes; S se acepta por compatibilidad (mismo criterio, no sobrantes)
+        stmt = stmt.where(_margesi_faltantes_inv_sit_clause())
+    elif q.inv_sit_filter == "N":
+        stmt = stmt.where(m.InvMargesiItem.inv_sit == "N")
+    local_code = (q.local_code or "").strip()
+    if local_code:
+        stmt = stmt.where(m.InvMargesiItem.amb_cod == local_code)
     pattern = _search_like(q)
     if pattern is not None:
         stmt = stmt.where(
@@ -1585,6 +1852,118 @@ def list_margesi(db: Session, tenant_id: UUID, q: RecordQuery, allowed_cols: set
         d["modelo"] = str(d.get("mar_mod") or "").strip() or "—"
         d["operativo"] = str(d.get("mar_uso") or "").strip() or "—"
         out.append(d)
+    return out, total
+
+
+_ITEM_PHOTOS_SELECT = """
+SELECT
+    ic.id AS itemcard_id,
+    ic.id_card AS card_id,
+    ic.inv_num,
+    ic.mar_cpat,
+    ic.mar_des,
+    ic.inv_sit,
+    c.hoj_num,
+    photo.slot AS photo_slot,
+    photo.photo_url
+FROM itemcards ic
+JOIN cards c ON c.id = ic.id_card AND c.tenant_id = ic.tenant_id
+CROSS JOIN LATERAL (
+    SELECT slot, photo_url FROM (VALUES
+        (1, NULLIF(TRIM(COALESCE(ic.extra->>'mar_foto', ic.extra->>'foto_bien', '')), '')),
+        (2, NULLIF(TRIM(COALESCE(ic.extra->>'mar_foto2', ic.extra->>'foto2_bien', '')), '')),
+        (3, NULLIF(TRIM(COALESCE(ic.extra->>'mar_foto3', ic.extra->>'foto3_bien', '')), ''))
+    ) AS t(slot, photo_url)
+    WHERE photo_url IS NOT NULL
+) photo
+WHERE ic.tenant_id = CAST(:tenant_id AS uuid)
+"""
+
+
+def _item_photos_where(q: ItemPhotoQuery) -> tuple[str, dict[str, Any]]:
+    clauses: list[str] = []
+    params: dict[str, Any] = {}
+
+    if q.photo_slot in (1, 2, 3):
+        clauses.append("photo.slot = :photo_slot")
+        params["photo_slot"] = q.photo_slot
+
+    if q.inv_sit_filter in ("C", "S"):
+        clauses.append("ic.inv_sit = :inv_sit_filter")
+        params["inv_sit_filter"] = q.inv_sit_filter
+
+    term = (q.search or "").strip()
+    if term:
+        clauses.append(
+            """(
+            CAST(ic.inv_num AS text) ILIKE :search OR
+            ic.mar_cpat ILIKE :search OR
+            ic.mar_des ILIKE :search OR
+            CAST(c.hoj_num AS text) ILIKE :search
+        )"""
+        )
+        params["search"] = f"%{term}%"
+    elif q.value not in (None, ""):
+        col = q.column if q.column in {"inv_num", "mar_cpat", "mar_des", "num_card", "hoj_num"} else "mar_des"
+        if col in ("num_card", "hoj_num"):
+            parsed = try_parse_inventory_number(q.value)
+            if parsed is not None:
+                clauses.append("c.hoj_num = :hoj_num")
+                params["hoj_num"] = parsed
+            else:
+                clauses.append("CAST(c.hoj_num AS text) ILIKE :col_value")
+                params["col_value"] = f"%{q.value}%"
+        elif col == "inv_num":
+            parsed = try_parse_inventory_number(q.value)
+            if parsed is not None:
+                clauses.append("ic.inv_num = :inv_num")
+                params["inv_num"] = parsed
+            else:
+                clauses.append("CAST(ic.inv_num AS text) ILIKE :col_value")
+                params["col_value"] = f"%{q.value}%"
+        else:
+            clauses.append(f"ic.{col} ILIKE :col_value")
+            params["col_value"] = f"%{q.value}%"
+
+    if not clauses:
+        return "", params
+    return " AND " + " AND ".join(clauses), params
+
+
+def list_item_photos(db: Session, tenant_id: UUID, q: ItemPhotoQuery) -> tuple[list[dict[str, Any]], int]:
+    """Lista fotos de bienes (una fila por slot con URL en ``itemcards.extra``)."""
+    where_sql, params = _item_photos_where(q)
+    base_params: dict[str, Any] = {"tenant_id": str(tenant_id), **params}
+
+    count_sql = text(f"SELECT COUNT(*) FROM ({_ITEM_PHOTOS_SELECT}{where_sql}) sub")
+    total = int(db.scalar(count_sql, base_params) or 0)
+
+    order_dir = "DESC" if (q.ord_tipo or "desc").lower() == "desc" else "ASC"
+    offset = (q.page - 1) * q.per_page
+    data_sql = text(
+        f"{_ITEM_PHOTOS_SELECT}{where_sql} ORDER BY ic.id {order_dir}, photo.slot ASC "
+        f"LIMIT :limit OFFSET :offset"
+    )
+    rows = db.execute(
+        data_sql,
+        {**base_params, "limit": q.per_page, "offset": offset},
+    ).mappings().all()
+
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        out.append(
+            {
+                "itemcard_id": int(row["itemcard_id"]),
+                "card_id": int(row["card_id"]),
+                "inv_num": row["inv_num"],
+                "mar_cpat": row["mar_cpat"],
+                "mar_des": row["mar_des"],
+                "inv_sit": row["inv_sit"],
+                "hoj_num": row["hoj_num"],
+                "photo_slot": int(row["photo_slot"]),
+                "photo_url": str(row["photo_url"]),
+            }
+        )
     return out, total
 
 
@@ -1838,6 +2217,141 @@ def inventory_dashboard(
         },
         "by_month": by_month,
     }
+
+
+def inventory_dashboard_establishment_stats(
+    db: Session,
+    tenant_id: UUID,
+    *,
+    page: int = 1,
+    per_page: int = 20,
+    search: str | None = None,
+) -> dict[str, Any]:
+    """Totales por local desde cache materializado (SELECT rápido)."""
+    from app.modules.inventory.dashboard_establishment_stats_cache import (
+        dashboard_establishment_stats_cache_count,
+        schedule_dashboard_establishment_stats_tenant_refresh,
+    )
+
+    if dashboard_establishment_stats_cache_count(db, tenant_id) == 0:
+        schedule_dashboard_establishment_stats_tenant_refresh(tenant_id)
+        return _inventory_dashboard_establishment_stats_live(
+            db,
+            tenant_id,
+            page=page,
+            per_page=per_page,
+            search=search,
+        )
+
+    search_term = (search or "").strip()
+    stmt = select(m.InvDashboardEstablishmentStat).where(
+        m.InvDashboardEstablishmentStat.tenant_id == tenant_id,
+    )
+    if search_term:
+        pattern = f"%{search_term}%"
+        stmt = stmt.where(
+            or_(
+                m.InvDashboardEstablishmentStat.establishment_code.ilike(pattern),
+                m.InvDashboardEstablishmentStat.establishment_description.ilike(pattern),
+            ),
+        )
+    stmt = stmt.order_by(m.InvDashboardEstablishmentStat.establishment_code.asc())
+    rows, total = _paged(db, stmt, page, per_page)
+    data = [
+        {
+            "establishment_id": int(row.establishment_id),
+            "establishment_code": row.establishment_code,
+            "establishment_description": row.establishment_description,
+            "margesi_total": int(row.margesi_total or 0),
+            "margesi_conciliado": int(row.margesi_conciliado or 0),
+            "margesi_faltantes": int(row.margesi_faltantes or 0),
+            "margesi_no_inventariable": int(row.margesi_no_inventariable or 0),
+            "inventario_total": int(row.inventario_total or 0),
+            "inventario_conciliado": int(row.inventario_conciliado or 0),
+            "inventario_sobrante": int(row.inventario_sobrante or 0),
+            "inventario_no_conciliable": int(row.inventario_no_conciliable or 0),
+        }
+        for row in rows
+    ]
+    return {"data": data, "meta": paged_meta(total, page, per_page)}
+
+
+def _inventory_dashboard_establishment_stats_live(
+    db: Session,
+    tenant_id: UUID,
+    *,
+    page: int = 1,
+    per_page: int = 20,
+    search: str | None = None,
+) -> dict[str, Any]:
+    """Consulta en vivo (fallback mientras se puebla el cache)."""
+    search_term = (search or "").strip()
+    bind: dict[str, Any] = {"tenant_id": str(tenant_id)}
+    where_extra = ""
+    if search_term:
+        where_extra = " AND (e.code ILIKE :search OR COALESCE(e.description, '') ILIKE :search)"
+        bind["search"] = f"%{search_term}%"
+
+    count_sql = f"""
+        SELECT COUNT(*)::int
+        FROM establishments e
+        WHERE e.tenant_id = CAST(:tenant_id AS uuid)
+        {where_extra}
+    """
+    total = int(db.execute(text(count_sql), bind).scalar() or 0)
+
+    offset = (page - 1) * per_page
+    data_bind = {**bind, "limit": per_page, "offset": offset}
+    data_sql = f"""
+        SELECT
+            e.id AS establishment_id,
+            e.code AS establishment_code,
+            e.description AS establishment_description,
+            COUNT(DISTINCT m.id) AS margesi_total,
+            COUNT(DISTINCT m.id) FILTER (WHERE m.inv_sit = 'C') AS margesi_conciliado,
+            COUNT(DISTINCT m.id) FILTER (
+                WHERE m.inv_sit IS NULL
+                   OR TRIM(COALESCE(m.inv_sit, '')) = ''
+                   OR m.inv_sit IN ('-', '—', '–')
+            ) AS margesi_faltantes,
+            COUNT(DISTINCT m.id) FILTER (WHERE m.inv_sit = 'N') AS margesi_no_inventariable,
+            COUNT(DISTINCT ic.id) AS inventario_total,
+            COUNT(DISTINCT ic.id) FILTER (WHERE ic.inv_sit = 'C') AS inventario_conciliado,
+            COUNT(DISTINCT ic.id) FILTER (WHERE ic.inv_sit = 'S') AS inventario_sobrante,
+            COUNT(DISTINCT ic.id) FILTER (WHERE ic.inv_sit = 'N') AS inventario_no_conciliable
+        FROM establishments e
+        LEFT JOIN margesi m
+            ON m.tenant_id = e.tenant_id AND m.amb_cod = e.code
+        LEFT JOIN enviroments env
+            ON env.tenant_id = e.tenant_id AND env.establishment_id = e.id
+        LEFT JOIN cards c
+            ON c.tenant_id = e.tenant_id AND c.id_ambiente = env.id
+        LEFT JOIN itemcards ic
+            ON ic.tenant_id = c.tenant_id AND ic.id_card = c.id
+        WHERE e.tenant_id = CAST(:tenant_id AS uuid)
+        {where_extra}
+        GROUP BY e.id, e.code, e.description
+        ORDER BY e.code ASC
+        LIMIT :limit OFFSET :offset
+    """
+    rows = db.execute(text(data_sql), data_bind).mappings().all()
+    data = [
+        {
+            "establishment_id": int(row["establishment_id"]),
+            "establishment_code": str(row["establishment_code"] or ""),
+            "establishment_description": row["establishment_description"],
+            "margesi_total": int(row["margesi_total"] or 0),
+            "margesi_conciliado": int(row["margesi_conciliado"] or 0),
+            "margesi_faltantes": int(row["margesi_faltantes"] or 0),
+            "margesi_no_inventariable": int(row["margesi_no_inventariable"] or 0),
+            "inventario_total": int(row["inventario_total"] or 0),
+            "inventario_conciliado": int(row["inventario_conciliado"] or 0),
+            "inventario_sobrante": int(row["inventario_sobrante"] or 0),
+            "inventario_no_conciliable": int(row["inventario_no_conciliable"] or 0),
+        }
+        for row in rows
+    ]
+    return {"data": data, "meta": paged_meta(total, page, per_page)}
 
 
 def _user_registration_stats(

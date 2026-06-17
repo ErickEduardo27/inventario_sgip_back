@@ -11,6 +11,31 @@ from sqlalchemy.orm import Session
 from app.core.inventory_numbers import format_inv_num, numeric_column_filter, try_parse_inventory_number
 from app.modules.inventory import models as m
 from app.modules.inventory.reporte_aptot_cache import schedule_reporte_aptot_cache_refresh
+from app.modules.inventory.dashboard_establishment_stats_cache import (
+    establishment_ids_for_conciliation_pair,
+    establishment_ids_for_item_card,
+    establishment_ids_for_margesi,
+    schedule_dashboard_establishment_stats_refresh,
+)
+
+
+def _schedule_inventory_caches_refresh(
+    db: Session,
+    tenant_id: UUID,
+    *,
+    marg: m.InvMargesiItem | None = None,
+    bien: m.InvItemCard | None = None,
+) -> None:
+    schedule_reporte_aptot_cache_refresh(tenant_id)
+    if marg is not None and bien is not None:
+        est_ids = establishment_ids_for_conciliation_pair(db, tenant_id, marg, bien)
+    elif marg is not None:
+        est_ids = establishment_ids_for_margesi(db, tenant_id, marg)
+    elif bien is not None:
+        est_ids = establishment_ids_for_item_card(db, tenant_id, bien)
+    else:
+        est_ids = []
+    schedule_dashboard_establishment_stats_refresh(tenant_id, est_ids)
 from app.modules.inventory.schemas import (
     ConciliationFilters,
     ImportConciliationRow,
@@ -545,7 +570,7 @@ def conciliar_pair(
         db.add(marg)
         db.add(bien)
         db.commit()
-        schedule_reporte_aptot_cache_refresh(tenant_id)
+        _schedule_inventory_caches_refresh(db, tenant_id, marg=marg, bien=bien)
         return True, "Bienes conciliados"
     except Exception:  # noqa: BLE001
         db.rollback()
@@ -601,7 +626,7 @@ def conciliar_pair_sbn(
         db.add(marg)
         db.add(bien)
         db.commit()
-        schedule_reporte_aptot_cache_refresh(tenant_id)
+        _schedule_inventory_caches_refresh(db, tenant_id, marg=marg, bien=bien)
         return True, "Bienes conciliados (SBN)"
     except Exception:  # noqa: BLE001
         db.rollback()
@@ -636,7 +661,7 @@ def desconciliar_item(db: Session, tenant_id: UUID, item_id: int) -> tuple[bool,
         db.add(marg)
         db.add(bien)
         db.commit()
-        schedule_reporte_aptot_cache_refresh(tenant_id)
+        _schedule_inventory_caches_refresh(db, tenant_id, marg=marg, bien=bien)
         return True, "Bienes desconciliados"
     except Exception:  # noqa: BLE001
         db.rollback()
@@ -679,7 +704,7 @@ def desconciliar_pair_sbn(
         db.add(marg)
         db.add(bien)
         db.commit()
-        schedule_reporte_aptot_cache_refresh(tenant_id)
+        _schedule_inventory_caches_refresh(db, tenant_id, marg=marg, bien=bien)
         return True, "Bienes desconciliados (SBN)"
     except Exception:  # noqa: BLE001
         db.rollback()
@@ -702,6 +727,8 @@ def mark_no_conciliable_entity(
     observacion: str | None,
 ) -> tuple[bool, str]:
     try:
+        marg_row: m.InvMargesiItem | None = None
+        bien_row: m.InvItemCard | None = None
         if tipo == "margesi":
             row = db.get(m.InvMargesiItem, entity_id)
             if not row or row.tenant_id != tenant_id:
@@ -711,6 +738,7 @@ def mark_no_conciliable_entity(
             row.inv_sit = "N"
             _set_margesi_obs(row, observacion)
             db.add(row)
+            marg_row = row
         elif tipo == "bien":
             row = db.get(m.InvItemCard, entity_id)
             if not row or row.tenant_id != tenant_id:
@@ -720,10 +748,11 @@ def mark_no_conciliable_entity(
             row.inv_sit = "N"
             _set_bien_obs(row, observacion)
             db.add(row)
+            bien_row = row
         else:
             return False, "Tipo de registro no válido."
         db.commit()
-        schedule_reporte_aptot_cache_refresh(tenant_id)
+        _schedule_inventory_caches_refresh(db, tenant_id, marg=marg_row, bien=bien_row)
         return True, "Registro marcado como no conciliable"
     except Exception:  # noqa: BLE001
         db.rollback()
@@ -738,6 +767,8 @@ def mark_conciliable_entity(
     observacion: str | None,
 ) -> tuple[bool, str]:
     try:
+        marg_row: m.InvMargesiItem | None = None
+        bien_row: m.InvItemCard | None = None
         if tipo == "margesi":
             row = db.get(m.InvMargesiItem, entity_id)
             if not row or row.tenant_id != tenant_id:
@@ -745,6 +776,7 @@ def mark_conciliable_entity(
             row.inv_sit = None
             _set_margesi_obs(row, observacion)
             db.add(row)
+            marg_row = row
         elif tipo == "bien":
             row = db.get(m.InvItemCard, entity_id)
             if not row or row.tenant_id != tenant_id:
@@ -754,10 +786,11 @@ def mark_conciliable_entity(
             row.inv_sit = "S"
             _set_bien_obs(row, observacion)
             db.add(row)
+            bien_row = row
         else:
             return False, "Tipo de registro no válido."
         db.commit()
-        schedule_reporte_aptot_cache_refresh(tenant_id)
+        _schedule_inventory_caches_refresh(db, tenant_id, marg=marg_row, bien=bien_row)
         return True, "Registro habilitado para conciliación"
     except Exception:  # noqa: BLE001
         db.rollback()

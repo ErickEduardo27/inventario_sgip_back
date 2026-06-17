@@ -53,6 +53,7 @@ def _run_gcs_import(
     processor: Callable[..., dict[str, Any]],
     extra_kwargs: dict[str, Any] | None = None,
     pass_operator_id: bool = False,
+    dashboard_stats_module: str | None = None,
 ) -> dict[str, Any]:
     extra_kwargs = extra_kwargs or {}
     job_uuid = UUID(job_id)
@@ -125,6 +126,12 @@ def _run_gcs_import(
             if job is not None:
                 jobs_svc.finalize_from_result(db, job, result)
                 db.commit()
+            if result.get("success") and dashboard_stats_module:
+                from app.modules.inventory.dashboard_establishment_stats_cache import (
+                    maybe_schedule_dashboard_stats_after_import,
+                )
+
+                maybe_schedule_dashboard_stats_after_import(dashboard_stats_module, tenant_uuid)
             return result
     except Exception as exc:  # noqa: BLE001
         with SessionLocal() as db:
@@ -150,6 +157,7 @@ def import_establishments_task(self, job_id: str, tenant_id: str, gcs_path: str,
         gcs_path=gcs_path,
         filename=filename,
         processor=establishment_import.process_establishment_upload,
+        dashboard_stats_module="establishments",
     )
 
 
@@ -162,6 +170,7 @@ def import_environments_task(self, job_id: str, tenant_id: str, gcs_path: str, f
         gcs_path=gcs_path,
         filename=filename,
         processor=environment_import.process_environment_upload,
+        dashboard_stats_module="environments",
     )
 
 
@@ -218,6 +227,7 @@ def import_margesi_task(self, job_id: str, tenant_id: str, gcs_path: str, filena
         gcs_path=gcs_path,
         filename=filename,
         processor=margesi_import.process_margesi_upload,
+        dashboard_stats_module="margesi",
     )
 
 
@@ -230,6 +240,7 @@ def import_margesi_moment_task(self, job_id: str, tenant_id: str, gcs_path: str,
         gcs_path=gcs_path,
         filename=filename,
         processor=margesi_import.process_margesi_moment_upload,
+        dashboard_stats_module="margesi_moment",
     )
 
 
@@ -243,6 +254,7 @@ def import_hoja_captura_task(self, job_id: str, tenant_id: str, gcs_path: str, f
         filename=filename,
         processor=hoja_captura_import.process_hoja_captura_upload,
         pass_operator_id=True,
+        dashboard_stats_module="hoja_captura",
     )
 
 
@@ -256,4 +268,5 @@ def import_cards_task(self, job_id: str, tenant_id: str, gcs_path: str, filename
         filename=filename,
         processor=cards_import.process_cards_upload,
         pass_operator_id=True,
+        dashboard_stats_module="cards",
     )

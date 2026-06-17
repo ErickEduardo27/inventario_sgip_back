@@ -48,6 +48,7 @@ INVENTORY_UI_COMPONENT_CODES: frozenset[str] = frozenset(
         "margesi",
         "hoja_captura",
         "bienes",
+        "imagenes",
         "reporte_aptot",
         "conciliacion",
         "conciliacion_sbn",

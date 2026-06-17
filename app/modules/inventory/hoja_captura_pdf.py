@@ -764,3 +764,21 @@ def generate_ficha_pdf(db: Session, tenant_id: UUID, card_id: int) -> tuple[byte
     doc.build(story, onFirstPage=on_page, onLaterPages=on_page)
     filename = (card.pdf or f"HC-{hoj_num}.pdf").strip() or f"HC-{hoj_num}.pdf"
     return buf.getvalue(), filename
+
+
+def merge_pdf_documents(parts: list[bytes]) -> bytes:
+    """Concatena varios PDF en uno solo."""
+    if not parts:
+        raise ValueError("No hay documentos PDF para combinar")
+    if len(parts) == 1:
+        return parts[0]
+    from pypdf import PdfReader, PdfWriter
+
+    writer = PdfWriter()
+    for chunk in parts:
+        reader = PdfReader(io.BytesIO(chunk))
+        for page in reader.pages:
+            writer.add_page(page)
+    out = io.BytesIO()
+    writer.write(out)
+    return out.getvalue()

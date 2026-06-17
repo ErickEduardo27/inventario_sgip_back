@@ -244,10 +244,33 @@ class RecordQuery(BaseModel):
     column_ord: str | None = None
     ord_tipo: str = "asc"
     flag_firma: bool | None = None
-    inv_sit_filter: Literal["C", "S"] | None = Field(
+    inv_sit_filter: Literal["C", "S", "N", "F"] | None = Field(
         default=None,
-        description="Filtrar bienes por situación: C conciliados, S sobrantes",
+        description="C conciliados; F faltantes (margesi: vacío/guion); N no inventariable; S sobrantes (bienes)",
     )
+    local_code: str | None = Field(
+        default=None,
+        description="Filtrar margesi donde amb_cod coincide con el código del local",
+    )
+
+
+class ItemPhotoQuery(RecordQuery):
+    photo_slot: Literal[1, 2, 3] | None = Field(
+        default=None,
+        description="Filtrar por slot de foto (1, 2 o 3)",
+    )
+
+
+class ItemPhotoRow(BaseModel):
+    itemcard_id: int
+    card_id: int
+    inv_num: int | str | None = None
+    mar_cpat: str | None = None
+    mar_des: str | None = None
+    inv_sit: str | None = None
+    hoj_num: int | str | None = None
+    photo_slot: int
+    photo_url: str
 
 
 class InventoryMonthlyCount(BaseModel):
@@ -277,6 +300,25 @@ class InventoryDashboardResponse(BaseModel):
 class InventoryUserRegistrationsResponse(BaseModel):
     total: int
     by_user: list[InventoryUserRegistrationStat]
+
+
+class DashboardEstablishmentStatRow(BaseModel):
+    establishment_id: int
+    establishment_code: str
+    establishment_description: str | None = None
+    margesi_total: int = 0
+    margesi_conciliado: int = 0
+    margesi_faltantes: int = 0
+    margesi_no_inventariable: int = 0
+    inventario_total: int = 0
+    inventario_conciliado: int = 0
+    inventario_sobrante: int = 0
+    inventario_no_conciliable: int = 0
+
+
+class DashboardEstablishmentStatsResponse(BaseModel):
+    data: list[DashboardEstablishmentStatRow]
+    meta: PagedMeta
 
 
 class AuditLogQuery(BaseModel):
@@ -457,6 +499,15 @@ class MargesiImportResult(BaseModel):
     errors: list[str] = Field(default_factory=list)
     async_job: bool = False
     job_id: str | None = None
+
+
+class HojaCapturaBulkPdfRequest(BaseModel):
+    """Solicitud de PDF único con varias fichas de hoja de captura."""
+
+    mode: Literal["range", "local"]
+    hoj_num_from: int | None = Field(default=None, ge=0)
+    hoj_num_to: int | None = Field(default=None, ge=0)
+    establishment_id: int | None = Field(default=None, ge=1)
 
 
 class HojaCapturaImportResult(BaseModel):

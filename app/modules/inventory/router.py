@@ -29,7 +29,12 @@ from app.modules.inventory import geo_catalog as geo
 from app.modules.inventory import models as inv_models
 from app.modules.inventory import service as inv
 from app.modules.inventory.csv_export import csv_download_response
-from app.modules.inventory.export_queries import build_cards_export_query, build_item_cards_export_query, get_export_query
+from app.modules.inventory.export_queries import (
+    build_cards_export_query,
+    build_item_cards_export_query,
+    build_margesi_export_query,
+    get_export_query,
+)
 from app.modules.inventory.schemas import (
     AuditLogQuery,
     CardItemWrite,
@@ -51,6 +56,7 @@ from app.modules.inventory.schemas import (
     ImportJobStatus,
     HojaCapturaTablesResponse,
     HojaCapturaImportResult,
+    HojaCapturaBulkPdfRequest,
     ImportConciliationMatchRequest,
     ImportConciliationResult,
     ImportConciliationRow,
@@ -58,11 +64,14 @@ from app.modules.inventory.schemas import (
     ImportNoConciliableMatchRequest,
     NoConciliableMarkWrite,
     InventoryDashboardResponse,
+    DashboardEstablishmentStatsResponse,
     InventoryUserRegistrationsResponse,
     InventoryNumWrite,
     ItemCardTablesResponse,
     ItemPhotoUploadResult,
     ItemCardTranslate,
+    ItemPhotoQuery,
+    ItemPhotoRow,
     ListSbnWrite,
     ListSbnImportResult,
     MargesiImportResult,
@@ -112,10 +121,11 @@ def _q(
     column_ord: str | None = Query(None, alias="columnOrd"),
     ord_tipo: str = Query("asc", alias="ordTipo"),
     flag_firma: bool | None = Query(None, description="Filtrar hojas por flag de firma"),
-    inv_sit_filter: Literal["C", "S"] | None = Query(
+    inv_sit_filter: Literal["C", "S", "N", "F"] | None = Query(
         None,
-        description="Filtrar bienes: C conciliados, S sobrantes",
+        description="Margesi: C conciliados, F faltantes, N no inventariable. Bienes: C/S",
     ),
+    local_code: str | None = Query(None, description="Filtrar margesi por amb_cod = código de local"),
 ) -> RecordQuery:
     return RecordQuery(
         page=page,
@@ -128,6 +138,34 @@ def _q(
         ord_tipo=ord_tipo,
         flag_firma=flag_firma,
         inv_sit_filter=inv_sit_filter,
+        local_code=local_code,
+    )
+
+
+def _item_photo_q(
+    page: int = Query(1, ge=1),
+    per_page: int = Query(24, ge=1, le=200),
+    column: str = Query("mar_des"),
+    value: str | None = Query(None),
+    search: str | None = Query(None, description="Búsqueda por N° inventario, SBN, descripción o hoja"),
+    column_ord: str | None = Query(None, alias="columnOrd"),
+    ord_tipo: str = Query("desc", alias="ordTipo"),
+    inv_sit_filter: Literal["C", "S"] | None = Query(
+        None,
+        description="Filtrar bienes: C conciliados, S sobrantes",
+    ),
+    photo_slot: Literal[1, 2, 3] | None = Query(None, description="Filtrar por slot de foto (1-3)"),
+) -> ItemPhotoQuery:
+    return ItemPhotoQuery(
+        page=page,
+        per_page=per_page,
+        column=column,
+        value=value,
+        search=search,
+        column_ord=column_ord,
+        ord_tipo=ord_tipo,
+        inv_sit_filter=inv_sit_filter,
+        photo_slot=photo_slot,
     )
 
 
@@ -888,6 +926,33 @@ def hoja_captura_close(
     return OkPayload(success=True, message=msg)
 
 
+@router.post("/hoja-captura/pdf-fichas/bulk")
+def hoja_captura_bulk_pdf_fichas(
+    body: HojaCapturaBulkPdfRequest,
+    db: Session = Depends(get_db),
+    tenant_id: UUID = Depends(get_tenant_id),
+    _: User = Depends(get_current_user),
+):
+    try:
+        pdf_bytes, filename = inv.build_hoja_captura_bulk_ficha_pdf(
+            db,
+            tenant_id,
+            mode=body.mode,
+            hoj_num_from=body.hoj_num_from,
+            hoj_num_to=body.hoj_num_to,
+            establishment_id=body.establishment_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"Error al generar PDF: {exc}") from exc
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
 @router.get("/hoja-captura/{card_id}/pdf-ficha")
 def hoja_captura_pdf_ficha(
     card_id: int,
@@ -921,6 +986,20 @@ def margesi_lookup(
 
 
 # --- Bienes (itemcards) ---
+
+
+@router.get("/item-photos/records", response_model=PagedRows)
+def item_photos_records(
+    db: Session = Depends(get_db),
+    tenant_id: UUID = Depends(get_tenant_id),
+    q: ItemPhotoQuery = Depends(_item_photo_q),
+    _: User = Depends(require_permission("imagenes", "view")),
+):
+    rows, total = inv.list_item_photos(db, tenant_id, q)
+    return PagedRows(
+        data=[ItemPhotoRow(**r).model_dump() for r in rows],
+        meta=PagedMeta(**inv.paged_meta(total, q.page, q.per_page)),
+    )
 
 
 @router.get("/item-cards/records", response_model=PagedRows)
@@ -1073,12 +1152,25 @@ def margesi_records(db: Session = Depends(get_db), tenant_id: UUID = Depends(get
     return PagedRows(data=rows, meta=PagedMeta(**inv.paged_meta(total, q.page, q.per_page)))
 
 
-router.add_api_route(
-    "/margesi/export",
-    _csv_export_route("margesi", "margesi"),
-    methods=["GET"],
-    tags=["inventory"],
-)
+@router.get("/margesi/export")
+def margesi_export(
+    db: Session = Depends(get_db),
+    tenant_id: UUID = Depends(get_tenant_id),
+    q: RecordQuery = Depends(_q),
+    _: User = Depends(require_permission("margesi", "export")),
+):
+    """Export CSV de margesi; acepta ``search`` e ``inv_sit_filter`` como el listado (COPY en PostgreSQL)."""
+    try:
+        inner_sql, params, filename_base = build_margesi_export_query(tenant_id, q)
+        return csv_download_response(
+            db,
+            tenant_id=tenant_id,
+            inner_sql=inner_sql,
+            filename_base=filename_base,
+            params=params,
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"Error al exportar CSV: {exc}") from exc
 
 
 @router.get("/margesi/{row_id}")
@@ -1229,6 +1321,36 @@ def inventory_user_registrations(
         date_to=date_to,
         month=month,
     )
+
+
+@router.get("/dashboard/establishment-stats", response_model=DashboardEstablishmentStatsResponse)
+def inventory_dashboard_establishment_stats(
+    db: Session = Depends(get_db),
+    tenant_id: UUID = Depends(get_tenant_id),
+    page: int = Query(1, ge=1),
+    per_page: int = Query(20, ge=1, le=100),
+    search: str | None = Query(None, description="Filtrar por código o nombre de local"),
+):
+    return inv.inventory_dashboard_establishment_stats(
+        db,
+        tenant_id,
+        page=page,
+        per_page=per_page,
+        search=search,
+    )
+
+
+@router.post("/dashboard/establishment-stats/refresh", response_model=OkPayload)
+def inventory_dashboard_establishment_stats_refresh(
+    tenant_id: UUID = Depends(get_tenant_id),
+    _: User = Depends(require_permission("dashboard", "view")),
+):
+    from app.modules.inventory.dashboard_establishment_stats_cache import (
+        schedule_dashboard_establishment_stats_tenant_refresh,
+    )
+
+    schedule_dashboard_establishment_stats_tenant_refresh(tenant_id)
+    return OkPayload(success=True, message="Actualización del resumen por local encolada")
 
 
 @router.get("/reporte-aptot/cache-meta")

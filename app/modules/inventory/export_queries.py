@@ -360,6 +360,54 @@ def build_cards_export_query(tenant_id: UUID, q: RecordQuery) -> tuple[str, tupl
     return sql, tuple(params), "hoja_captura_export"
 
 
+def build_margesi_export_query(tenant_id: UUID, q: RecordQuery) -> tuple[str, tuple[Any, ...], str]:
+    """SQL parametrizado para exportar margesi con los mismos filtros que el listado."""
+    where = ["m.tenant_id = %s::uuid"]
+    params: list[Any] = [str(tenant_id)]
+    allowed = {"inv_num", "mar_cpat", "mar_des", "inv_sit", "mar_num", "mar_mar", "mar_mod", "inv_hoj"}
+
+    if q.inv_sit_filter == "C":
+        where.append("m.inv_sit = %s")
+        params.append("C")
+    elif q.inv_sit_filter in ("F", "S"):
+        where.append(
+            "(m.inv_sit IS NULL OR TRIM(COALESCE(m.inv_sit, '')) = '' OR m.inv_sit IN ('-', '—', '–'))"
+        )
+    elif q.inv_sit_filter == "N":
+        where.append("m.inv_sit = %s")
+        params.append("N")
+
+    local_code = (q.local_code or "").strip()
+    if local_code:
+        where.append("m.amb_cod = %s")
+        params.append(local_code)
+
+    term = (q.search or "").strip()
+    if term:
+        like = f"%{term}%"
+        where.append(
+            """(
+            m.inv_num ILIKE %s OR m.mar_cpat ILIKE %s OR m.mar_des ILIKE %s
+            OR m.mar_num ILIKE %s OR m.mar_mar ILIKE %s OR m.mar_mod ILIKE %s OR m.inv_hoj ILIKE %s
+        )"""
+        )
+        params.extend([like] * 7)
+    elif q.value not in (None, ""):
+        col = q.column if q.column in allowed else "mar_cpat"
+        where.append(f"m.{col} ILIKE %s")
+        params.append(f"%{q.value}%")
+
+    sql = f"""
+        SELECT
+            {_margesi_column_list()},
+            COALESCE(m.extra::text, '') AS extra_json
+        FROM margesi m
+        WHERE {' AND '.join(where)}
+        ORDER BY m.id
+    """
+    return sql, tuple(params), "margesi_export"
+
+
 def build_item_cards_export_query(tenant_id: UUID, q: RecordQuery) -> tuple[str, tuple[Any, ...], str]:
     """SQL parametrizado para exportar bienes con los mismos filtros que el listado."""
     where = ["ic.tenant_id = %s::uuid"]
@@ -369,6 +417,15 @@ def build_item_cards_export_query(tenant_id: UUID, q: RecordQuery) -> tuple[str,
     if q.inv_sit_filter in ("C", "S"):
         where.append("ic.inv_sit = %s")
         params.append(q.inv_sit_filter)
+
+    if q.establishment_id is not None:
+        where.append("env.establishment_id = %s")
+        params.append(q.establishment_id)
+    else:
+        local_code = (q.local_code or "").strip()
+        if local_code:
+            where.append("est.code = %s")
+            params.append(local_code)
 
     if q.column == "num_card" and q.value not in (None, ""):
         hoj_n = try_parse_inventory_number(q.value)

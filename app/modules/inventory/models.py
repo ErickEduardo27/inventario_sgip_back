@@ -586,6 +586,35 @@ class InvReporteAptotCache(Base, TenantMixin):
     campo_libre: Mapped[str | None] = mapped_column(String(500), nullable=True)
 
 
+class InvDashboardEstablishmentStat(Base, TenantMixin):
+    """Totales materializados por local para el dashboard (lectura rápida)."""
+
+    __tablename__ = "dashboard_establishment_stats"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "establishment_id", name="uq_dashboard_est_stats_tenant_est"),
+        Index("ix_dashboard_est_stats_tenant", "tenant_id"),
+        Index("ix_dashboard_est_stats_tenant_code", "tenant_id", "establishment_code"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    establishment_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("establishments.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    establishment_code: Mapped[str] = mapped_column(String(100), nullable=False, default="")
+    establishment_description: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    margesi_total: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    margesi_conciliado: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    margesi_faltantes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    margesi_no_inventariable: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    inventario_total: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    inventario_conciliado: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    inventario_sobrante: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    inventario_no_conciliable: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    refreshed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class InvReporteAptotCacheMeta(Base):
     """Estado de la última reconstrucción del cache APTOT por tenant."""
 
