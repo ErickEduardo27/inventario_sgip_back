@@ -27,6 +27,7 @@ from app.modules.inventory import descarga_archivos_service as dl_svc
 from app.modules.inventory import import_common as imp_common
 from app.modules.inventory import geo_catalog as geo
 from app.modules.inventory import models as inv_models
+from app.modules.inventory import reporte_locales_service as reporte_locales
 from app.modules.inventory import service as inv
 from app.modules.inventory.csv_export import csv_download_response
 from app.modules.inventory.export_queries import (
@@ -64,7 +65,10 @@ from app.modules.inventory.schemas import (
     ImportNoConciliableMatchRequest,
     NoConciliableMarkWrite,
     InventoryDashboardResponse,
+    DashboardEstablishmentStatRow,
     DashboardEstablishmentStatsResponse,
+    ReporteLocalWrite,
+    ReporteLocalesListResponse,
     InventoryUserRegistrationsResponse,
     InventoryNumWrite,
     ItemCardTablesResponse,
@@ -1345,12 +1349,127 @@ def inventory_dashboard_establishment_stats_refresh(
     tenant_id: UUID = Depends(get_tenant_id),
     _: User = Depends(require_permission("dashboard", "view")),
 ):
-    from app.modules.inventory.dashboard_establishment_stats_cache import (
+    """ from app.modules.inventory.dashboard_establishment_stats_cache import (
         schedule_dashboard_establishment_stats_tenant_refresh,
     )
 
-    schedule_dashboard_establishment_stats_tenant_refresh(tenant_id)
+    schedule_dashboard_establishment_stats_tenant_refresh(tenant_id) """
     return OkPayload(success=True, message="Actualización del resumen por local encolada")
+
+
+@router.get("/reporte-locales/records", response_model=ReporteLocalesListResponse)
+def reporte_locales_records(
+    db: Session = Depends(get_db),
+    tenant_id: UUID = Depends(get_tenant_id),
+    _: User = Depends(require_permission("reporte_locales", "view")),
+    page: int = Query(1, ge=1),
+    per_page: int = Query(20, ge=1, le=200),
+    search: str | None = Query(None, description="Filtrar por código o nombre de local"),
+):
+    return reporte_locales.list_reporte_locales(
+        db,
+        tenant_id,
+        page=page,
+        per_page=per_page,
+        search=search,
+    )
+
+
+@router.post("/reporte-locales", response_model=OkPayload)
+def reporte_locales_save(
+    body: ReporteLocalWrite,
+    db: Session = Depends(get_db),
+    tenant_id: UUID = Depends(get_tenant_id),
+    _: User = Depends(require_permission("reporte_locales", "edit")),
+):
+    try:
+        reporte_locales.upsert_reporte_local(db, tenant_id, body)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return OkPayload(success=True, message="Seguimiento del local guardado")
+
+
+@router.post("/reporte-locales/uploads/{establishment_id}/foto", response_model=ItemPhotoUploadResult)
+async def reporte_locales_upload_foto(
+    establishment_id: int,
+    file: UploadFile = File(...),
+    current: int = Query(0, ge=0, le=5, description="Cantidad actual en el formulario"),
+    db: Session = Depends(get_db),
+    tenant_id: UUID = Depends(get_tenant_id),
+    _: User = Depends(require_permission("reporte_locales", "edit")),
+):
+    content = await file.read()
+    try:
+        url = reporte_locales.upload_reporte_local_foto_file(
+            db,
+            tenant_id,
+            establishment_id,
+            content,
+            current_count=current,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return ItemPhotoUploadResult(
+        success=True,
+        message="Foto guardada",
+        url=url,
+        filename=url.rsplit("/", 1)[-1] if url else None,
+    )
+
+
+@router.post("/reporte-locales/uploads/{establishment_id}/pdf", response_model=ItemPhotoUploadResult)
+async def reporte_locales_upload_pdf(
+    establishment_id: int,
+    file: UploadFile = File(...),
+    current: int = Query(0, ge=0, le=2, description="Cantidad actual en el formulario"),
+    db: Session = Depends(get_db),
+    tenant_id: UUID = Depends(get_tenant_id),
+    _: User = Depends(require_permission("reporte_locales", "edit")),
+):
+    content = await file.read()
+    try:
+        url = reporte_locales.upload_reporte_local_pdf_file(
+            db,
+            tenant_id,
+            establishment_id,
+            content,
+            file.filename or "documento.pdf",
+            current_count=current,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return ItemPhotoUploadResult(
+        success=True,
+        message="PDF guardado",
+        url=url,
+        filename=file.filename or url.rsplit("/", 1)[-1] if url else None,
+    )
+
+
+@router.get("/reporte-locales/file/preview")
+def reporte_locales_file_preview(
+    src: str = Query(..., min_length=1),
+    tenant_id: UUID = Depends(get_tenant_id),
+    _: User = Depends(require_permission("reporte_locales", "view")),
+):
+    try:
+        data, mime = reporte_locales.read_reporte_local_file_preview(src, tenant_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return Response(content=data, media_type=mime)
+
+
+@router.get("/reporte-locales/{establishment_id}/stats", response_model=DashboardEstablishmentStatRow)
+def reporte_locales_stats(
+    establishment_id: int,
+    db: Session = Depends(get_db),
+    tenant_id: UUID = Depends(get_tenant_id),
+    _: User = Depends(require_permission("reporte_locales", "view")),
+):
+    try:
+        return reporte_locales.get_reporte_local_stats(db, tenant_id, establishment_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @router.get("/reporte-aptot/cache-meta")

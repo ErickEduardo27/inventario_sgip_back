@@ -126,12 +126,12 @@ def _run_gcs_import(
             if job is not None:
                 jobs_svc.finalize_from_result(db, job, result)
                 db.commit()
-            if result.get("success") and dashboard_stats_module:
-                from app.modules.inventory.dashboard_establishment_stats_cache import (
-                    maybe_schedule_dashboard_stats_after_import,
-                )
-
-                maybe_schedule_dashboard_stats_after_import(dashboard_stats_module, tenant_uuid)
+            # Actualización automática del resumen dashboard deshabilitada (usar refresh manual).
+            # if result.get("success") and dashboard_stats_module:
+            #     from app.modules.inventory.dashboard_establishment_stats_cache import (
+            #         maybe_schedule_dashboard_stats_after_import,
+            #     )
+            #     maybe_schedule_dashboard_stats_after_import(dashboard_stats_module, tenant_uuid)
             return result
     except Exception as exc:  # noqa: BLE001
         with SessionLocal() as db:

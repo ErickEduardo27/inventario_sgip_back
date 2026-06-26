@@ -125,6 +125,16 @@ class Settings(BaseSettings):
         default="item-photos",
         description="Prefijo GCS para fotos de bienes en hoja de captura.",
     )
+    gcs_local_fotos_prefix: str = Field(
+        default="local-fotos",
+        validation_alias=AliasChoices("GCS_LOCAL_FOTOS"),
+        description="Prefijo GCS para fotos de locales (Reporte Locales).",
+    )
+    gcs_local_pdf_prefix: str = Field(
+        default="local-pdf",
+        validation_alias=AliasChoices("GCS_LOCAL_PDF"),
+        description="Prefijo GCS para PDF de locales (Reporte Locales).",
+    )
     gcs_logos_prefix: str = Field(
         default="tenant-logos",
         validation_alias=AliasChoices("GCS_IMPORT_PREFIX_LOGOS", "GCS_LOGOS_PREFIX"),

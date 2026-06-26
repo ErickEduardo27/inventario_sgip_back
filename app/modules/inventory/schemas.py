@@ -321,6 +321,52 @@ class DashboardEstablishmentStatsResponse(BaseModel):
     meta: PagedMeta
 
 
+ReporteLocalSituacion = Literal["pendiente", "en_proceso", "terminado"]
+
+
+class ReporteLocalWrite(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    establishment_id: int
+    fecha_inventario_propuesto: date | None = None
+    fecha_inventario_real: date | None = None
+    fotos_urls: list[str] = Field(default_factory=list)
+    pdfs_urls: list[str] = Field(default_factory=list)
+    nota: str | None = None
+    situacion: ReporteLocalSituacion = "pendiente"
+
+    @field_validator("fotos_urls", "pdfs_urls", mode="before")
+    @classmethod
+    def _normalize_url_lists(cls, v: object) -> list[str]:
+        if v is None:
+            return []
+        if not isinstance(v, list):
+            return []
+        return [str(x).strip() for x in v if str(x).strip()]
+
+    @field_validator("nota", mode="before")
+    @classmethod
+    def _strip_nota(cls, v: object) -> object:
+        return _empty_str_to_none(v)
+
+
+class ReporteLocalRow(BaseModel):
+    establishment_id: int
+    establishment_code: str
+    establishment_description: str | None = None
+    fecha_inventario_propuesto: date | None = None
+    fecha_inventario_real: date | None = None
+    fotos_urls: list[str] = Field(default_factory=list)
+    pdfs_urls: list[str] = Field(default_factory=list)
+    nota: str | None = None
+    situacion: ReporteLocalSituacion = "pendiente"
+
+
+class ReporteLocalesListResponse(BaseModel):
+    data: list[ReporteLocalRow]
+    meta: PagedMeta
+
+
 class AuditLogQuery(BaseModel):
     model_config = ConfigDict(extra="ignore")
 

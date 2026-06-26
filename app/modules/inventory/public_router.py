@@ -5,6 +5,7 @@ from __future__ import annotations
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
+from app.core.reporte_local_storage import read_local_reporte_local_file
 from app.core.item_photo_storage import read_local_item_photo
 from app.core.tenant_logo_storage import read_local_tenant_logo
 from fastapi.responses import Response
@@ -55,4 +56,19 @@ def serve_tenant_logo(tenant_id: UUID, filename: str) -> Response:
         content=body,
         media_type=mime,
         headers={"Cache-Control": "public, max-age=3600"},
+    )
+
+
+@router.get("/reporte-local/{kind}/{tenant_id}/{filename}")
+def serve_reporte_local_file(tenant_id: UUID, kind: str, filename: str) -> Response:
+    if kind not in ("foto", "pdf"):
+        raise HTTPException(status_code=404, detail="Archivo no encontrado")
+    pack = read_local_reporte_local_file(tenant_id, kind, filename)
+    if not pack:
+        raise HTTPException(status_code=404, detail="Archivo no encontrado")
+    body, mime = pack
+    return Response(
+        content=body,
+        media_type=mime,
+        headers={"Cache-Control": "public, max-age=86400"},
     )

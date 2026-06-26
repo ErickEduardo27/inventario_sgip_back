@@ -615,6 +615,29 @@ class InvDashboardEstablishmentStat(Base, TenantMixin):
     refreshed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
+class InvReporteLocal(Base, TenantMixin, TimestampMixin):
+    """Seguimiento de inventario por local (Reporte Locales)."""
+
+    __tablename__ = "reporte_locales"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "establishment_id", name="uq_reporte_locales_tenant_est"),
+        Index("ix_reporte_locales_tenant", "tenant_id"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    establishment_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("establishments.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    fecha_inventario_propuesto: Mapped[date | None] = mapped_column(Date, nullable=True)
+    fecha_inventario_real: Mapped[date | None] = mapped_column(Date, nullable=True)
+    fotos_urls: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, default=list)
+    pdfs_urls: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, default=list)
+    nota: Mapped[str | None] = mapped_column(Text, nullable=True)
+    situacion: Mapped[str] = mapped_column(String(32), nullable=False, default="pendiente")
+
+
 class InvReporteAptotCacheMeta(Base):
     """Estado de la última reconstrucción del cache APTOT por tenant."""
 

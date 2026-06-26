@@ -11,12 +11,17 @@ from sqlalchemy.orm import Session
 from app.core.inventory_numbers import format_inv_num, numeric_column_filter, try_parse_inventory_number
 from app.modules.inventory import models as m
 from app.modules.inventory.reporte_aptot_cache import schedule_reporte_aptot_cache_refresh
-from app.modules.inventory.dashboard_establishment_stats_cache import (
-    establishment_ids_for_conciliation_pair,
-    establishment_ids_for_item_card,
-    establishment_ids_for_margesi,
-    schedule_dashboard_establishment_stats_refresh,
+# from app.modules.inventory.dashboard_establishment_stats_cache import (
+#     establishment_ids_for_conciliation_pair,
+#     establishment_ids_for_item_card,
+#     establishment_ids_for_margesi,
+#     schedule_dashboard_establishment_stats_refresh,
+# )
+from app.modules.inventory.schemas import (
+    ConciliationFilters,
+    ImportConciliationRow,
 )
+from app.modules.inventory.service import _ord_clause, _paged, paged_meta, row_to_dict
 
 
 def _schedule_inventory_caches_refresh(
@@ -27,20 +32,16 @@ def _schedule_inventory_caches_refresh(
     bien: m.InvItemCard | None = None,
 ) -> None:
     schedule_reporte_aptot_cache_refresh(tenant_id)
-    if marg is not None and bien is not None:
-        est_ids = establishment_ids_for_conciliation_pair(db, tenant_id, marg, bien)
-    elif marg is not None:
-        est_ids = establishment_ids_for_margesi(db, tenant_id, marg)
-    elif bien is not None:
-        est_ids = establishment_ids_for_item_card(db, tenant_id, bien)
-    else:
-        est_ids = []
-    schedule_dashboard_establishment_stats_refresh(tenant_id, est_ids)
-from app.modules.inventory.schemas import (
-    ConciliationFilters,
-    ImportConciliationRow,
-)
-from app.modules.inventory.service import _ord_clause, _paged, paged_meta, row_to_dict
+    # Actualización automática del resumen dashboard deshabilitada (usar refresh manual).
+    # if marg is not None and bien is not None:
+    #     est_ids = establishment_ids_for_conciliation_pair(db, tenant_id, marg, bien)
+    # elif marg is not None:
+    #     est_ids = establishment_ids_for_margesi(db, tenant_id, marg)
+    # elif bien is not None:
+    #     est_ids = establishment_ids_for_item_card(db, tenant_id, bien)
+    # else:
+    #     est_ids = []
+    # schedule_dashboard_establishment_stats_refresh(tenant_id, est_ids)
 
 
 def _extra_dict(raw: Any) -> dict[str, Any]:

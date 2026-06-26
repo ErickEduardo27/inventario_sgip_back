@@ -99,6 +99,18 @@ def _fetch_stats_rows(
     return [_row_to_cache_dict(row, refreshed_at) for row in rows]
 
 
+def get_establishment_stats_live(
+    db: Session,
+    tenant_id: UUID,
+    establishment_id: int,
+) -> dict[str, Any]:
+    """Totales Margesi/inventario de un local (consulta en vivo, sin cache)."""
+    rows = _fetch_stats_rows(db, tenant_id, establishment_id=establishment_id)
+    if not rows:
+        raise ValueError("Local no encontrado")
+    return {k: v for k, v in rows[0].items() if k != "refreshed_at"}
+
+
 def _upsert_stats_rows(db: Session, tenant_id: UUID, rows: list[dict[str, Any]]) -> int:
     if not rows:
         return 0

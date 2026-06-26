@@ -226,11 +226,11 @@ def upsert_establishment(db: Session, tenant_id: UUID, body: EstablishmentWrite)
         db.add(row)
         db.commit()
         db.refresh(row)
-        from app.modules.inventory.dashboard_establishment_stats_cache import (
-            schedule_dashboard_establishment_stats_refresh,
-        )
-
-        schedule_dashboard_establishment_stats_refresh(tenant_id, [int(row.id)])
+        # Actualización automática del resumen dashboard deshabilitada (usar refresh manual).
+        # from app.modules.inventory.dashboard_establishment_stats_cache import (
+        #     schedule_dashboard_establishment_stats_refresh,
+        # )
+        # schedule_dashboard_establishment_stats_refresh(tenant_id, [int(row.id)])
         return row
     data = body.model_dump(exclude=_PHOTO_WRITE_EXCLUDE)
     row = m.InvEstablishment(tenant_id=tenant_id, **data)
@@ -238,11 +238,10 @@ def upsert_establishment(db: Session, tenant_id: UUID, body: EstablishmentWrite)
     db.add(row)
     db.commit()
     db.refresh(row)
-    from app.modules.inventory.dashboard_establishment_stats_cache import (
-        schedule_dashboard_establishment_stats_refresh,
-    )
-
-    schedule_dashboard_establishment_stats_refresh(tenant_id, [int(row.id)])
+    # from app.modules.inventory.dashboard_establishment_stats_cache import (
+    #     schedule_dashboard_establishment_stats_refresh,
+    # )
+    # schedule_dashboard_establishment_stats_refresh(tenant_id, [int(row.id)])
     return row
 
 
@@ -846,20 +845,20 @@ def upsert_card(
         db.add(row)
         db.commit()
         db.refresh(row)
-        from app.modules.inventory.dashboard_establishment_stats_cache import (
-            schedule_dashboard_establishment_stats_refresh,
-        )
-
-        est_ids: list[int] = []
-        if row.id_ambiente:
-            new_env = db.get(m.InvEnvironment, row.id_ambiente)
-            if new_env and new_env.establishment_id:
-                est_ids.append(int(new_env.establishment_id))
-        if old_ambiente_id and old_ambiente_id != row.id_ambiente:
-            old_env = db.get(m.InvEnvironment, old_ambiente_id)
-            if old_env and old_env.establishment_id:
-                est_ids.append(int(old_env.establishment_id))
-        schedule_dashboard_establishment_stats_refresh(tenant_id, est_ids)
+        # Actualización automática del resumen dashboard deshabilitada (usar refresh manual).
+        # from app.modules.inventory.dashboard_establishment_stats_cache import (
+        #     schedule_dashboard_establishment_stats_refresh,
+        # )
+        # est_ids: list[int] = []
+        # if row.id_ambiente:
+        #     new_env = db.get(m.InvEnvironment, row.id_ambiente)
+        #     if new_env and new_env.establishment_id:
+        #         est_ids.append(int(new_env.establishment_id))
+        # if old_ambiente_id and old_ambiente_id != row.id_ambiente:
+        #     old_env = db.get(m.InvEnvironment, old_ambiente_id)
+        #     if old_env and old_env.establishment_id:
+        #         est_ids.append(int(old_env.establishment_id))
+        # schedule_dashboard_establishment_stats_refresh(tenant_id, est_ids)
         return row
 
     if _hoj_num_taken(db, tenant_id, hoj_n):
@@ -879,15 +878,14 @@ def upsert_card(
 
     db.commit()
     db.refresh(row)
-    from app.modules.inventory.dashboard_establishment_stats_cache import (
-        establishment_ids_for_card,
-        schedule_dashboard_establishment_stats_refresh,
-    )
-
-    schedule_dashboard_establishment_stats_refresh(
-        tenant_id,
-        establishment_ids_for_card(db, tenant_id, int(row.id)),
-    )
+    # from app.modules.inventory.dashboard_establishment_stats_cache import (
+    #     establishment_ids_for_card,
+    #     schedule_dashboard_establishment_stats_refresh,
+    # )
+    # schedule_dashboard_establishment_stats_refresh(
+    #     tenant_id,
+    #     establishment_ids_for_card(db, tenant_id, int(row.id)),
+    # )
     return row
 
 
@@ -1383,17 +1381,16 @@ def store_card_item(
         except IntegrityError:
             db.rollback()
             return False, "Número de inventario ya registrado"
-        from app.modules.inventory.dashboard_establishment_stats_cache import (
-            schedule_dashboard_stats_after_card_item_change,
-        )
-
-        linked_marg = db.get(m.InvMargesiItem, ict.id_margesi) if ict.id_margesi else None
-        schedule_dashboard_stats_after_card_item_change(
-            db,
-            tenant_id,
-            card_id=card_id,
-            margesi_row=linked_marg,
-        )
+        # from app.modules.inventory.dashboard_establishment_stats_cache import (
+        #     schedule_dashboard_stats_after_card_item_change,
+        # )
+        # linked_marg = db.get(m.InvMargesiItem, ict.id_margesi) if ict.id_margesi else None
+        # schedule_dashboard_stats_after_card_item_change(
+        #     db,
+        #     tenant_id,
+        #     card_id=card_id,
+        #     margesi_row=linked_marg,
+        # )
         return True, "Item modificado"
 
     mar_cpat_base = (body.mar_cpat or "").strip()
@@ -1475,16 +1472,15 @@ def store_card_item(
     except IntegrityError:
         db.rollback()
         return False, "Número de inventario ya registrado"
-    from app.modules.inventory.dashboard_establishment_stats_cache import (
-        schedule_dashboard_stats_after_card_item_change,
-    )
-
-    schedule_dashboard_stats_after_card_item_change(
-        db,
-        tenant_id,
-        card_id=card_id,
-        margesi_row=marg_row,
-    )
+    # from app.modules.inventory.dashboard_establishment_stats_cache import (
+    #     schedule_dashboard_stats_after_card_item_change,
+    # )
+    # schedule_dashboard_stats_after_card_item_change(
+    #     db,
+    #     tenant_id,
+    #     card_id=card_id,
+    #     margesi_row=marg_row,
+    # )
     return True, "Item agregado"
 
 
@@ -1621,16 +1617,15 @@ def translate_item_card(db: Session, tenant_id: UUID, item_id: int, body: ItemCa
     db.add(new)
     db.add(rec)
     db.commit()
-    from app.modules.inventory.dashboard_establishment_stats_cache import (
-        schedule_dashboard_stats_after_item_move,
-    )
-
-    schedule_dashboard_stats_after_item_move(
-        db,
-        tenant_id,
-        old_card_id=int(body.id_card_old),
-        new_card_id=int(body.id_card),
-    )
+    # from app.modules.inventory.dashboard_establishment_stats_cache import (
+    #     schedule_dashboard_stats_after_item_move,
+    # )
+    # schedule_dashboard_stats_after_item_move(
+    #     db,
+    #     tenant_id,
+    #     old_card_id=int(body.id_card_old),
+    #     new_card_id=int(body.id_card),
+    # )
     return True, "Bien actualizado"
 
 
@@ -1675,16 +1670,15 @@ def delete_item_card(
         db.delete(item)
         db.add(card)
         db.commit()
-        from app.modules.inventory.dashboard_establishment_stats_cache import (
-            schedule_dashboard_stats_after_card_item_change,
-        )
-
-        schedule_dashboard_stats_after_card_item_change(
-            db,
-            tenant_id,
-            card_id=id_card,
-            margesi_row=linked_marg,
-        )
+        # from app.modules.inventory.dashboard_establishment_stats_cache import (
+        #     schedule_dashboard_stats_after_card_item_change,
+        # )
+        # schedule_dashboard_stats_after_card_item_change(
+        #     db,
+        #     tenant_id,
+        #     card_id=id_card,
+        #     margesi_row=linked_marg,
+        # )
         return True, "Bien eliminado con éxito"
     except Exception as e:  # noqa: BLE001
         db.rollback()
@@ -1768,15 +1762,14 @@ def upsert_margesi(db: Session, tenant_id: UUID, body: MargesiWrite) -> m.InvMar
             _bump_list_sbn_cat_ulti_from_margesi(db, tenant_id, row)
             db.commit()
             db.refresh(row)
-            from app.modules.inventory.dashboard_establishment_stats_cache import (
-                establishment_ids_for_margesi,
-                schedule_dashboard_establishment_stats_refresh,
-            )
-
-            schedule_dashboard_establishment_stats_refresh(
-                tenant_id,
-                establishment_ids_for_margesi(db, tenant_id, row),
-            )
+            # from app.modules.inventory.dashboard_establishment_stats_cache import (
+            #     establishment_ids_for_margesi,
+            #     schedule_dashboard_establishment_stats_refresh,
+            # )
+            # schedule_dashboard_establishment_stats_refresh(
+            #     tenant_id,
+            #     establishment_ids_for_margesi(db, tenant_id, row),
+            # )
             return row
         row = m.InvMargesiItem(tenant_id=tenant_id)
         apply_write_payload(row, data)
@@ -1784,15 +1777,14 @@ def upsert_margesi(db: Session, tenant_id: UUID, body: MargesiWrite) -> m.InvMar
         _bump_list_sbn_cat_ulti_from_margesi(db, tenant_id, row)
         db.commit()
         db.refresh(row)
-        from app.modules.inventory.dashboard_establishment_stats_cache import (
-            establishment_ids_for_margesi,
-            schedule_dashboard_establishment_stats_refresh,
-        )
-
-        schedule_dashboard_establishment_stats_refresh(
-            tenant_id,
-            establishment_ids_for_margesi(db, tenant_id, row),
-        )
+        # from app.modules.inventory.dashboard_establishment_stats_cache import (
+        #     establishment_ids_for_margesi,
+        #     schedule_dashboard_establishment_stats_refresh,
+        # )
+        # schedule_dashboard_establishment_stats_refresh(
+        #     tenant_id,
+        #     establishment_ids_for_margesi(db, tenant_id, row),
+        # )
         return row
     except Exception:
         db.rollback()
@@ -2230,11 +2222,11 @@ def inventory_dashboard_establishment_stats(
     """Totales por local desde cache materializado (SELECT rápido)."""
     from app.modules.inventory.dashboard_establishment_stats_cache import (
         dashboard_establishment_stats_cache_count,
-        schedule_dashboard_establishment_stats_tenant_refresh,
+        # schedule_dashboard_establishment_stats_tenant_refresh,
     )
 
     if dashboard_establishment_stats_cache_count(db, tenant_id) == 0:
-        schedule_dashboard_establishment_stats_tenant_refresh(tenant_id)
+        # schedule_dashboard_establishment_stats_tenant_refresh(tenant_id)
         return _inventory_dashboard_establishment_stats_live(
             db,
             tenant_id,
