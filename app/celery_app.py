@@ -29,6 +29,7 @@ celery_app = Celery(
         "app.tasks.reporte_aptot",
         "app.tasks.dashboard_establishment_stats",
         "app.tasks.csv_exports",
+        "app.tasks.reporte_locales_downloads",
     ],
 )
 

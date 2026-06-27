@@ -242,6 +242,9 @@ def upsert_establishment(db: Session, tenant_id: UUID, body: EstablishmentWrite)
     #     schedule_dashboard_establishment_stats_refresh,
     # )
     # schedule_dashboard_establishment_stats_refresh(tenant_id, [int(row.id)])
+    from app.modules.inventory.reporte_locales_service import ensure_reporte_local_row
+
+    ensure_reporte_local_row(db, tenant_id, int(row.id), commit=True)
     return row
 
 

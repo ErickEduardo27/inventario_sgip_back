@@ -5,7 +5,9 @@ from __future__ import annotations
 import mimetypes
 import re
 import uuid
+from datetime import datetime
 from pathlib import Path
+from urllib.parse import quote
 from uuid import UUID
 
 from app.core.config import get_settings
@@ -189,3 +191,72 @@ def read_reporte_local_file_bytes(stored: str, tenant_id: UUID) -> tuple[bytes, 
                 return _download_gcs_object(settings.gcs_bucket, key)
 
     return None
+
+
+def resolve_gcs_object_key(stored: str, tenant_id: UUID) -> str | None:
+    """Devuelve la clave de objeto GCS si la URL pertenece al tenant."""
+    raw = (stored or "").strip()
+    if not raw:
+        return None
+
+    gcs = _parse_gcs_url(raw)
+    settings = get_settings()
+    if gcs:
+        bucket, key = gcs
+        if settings.gcs_bucket and bucket == settings.gcs_bucket and _tenant_in_object_key(tenant_id, key):
+            return key
+        return None
+
+    if settings.gcs_bucket:
+        key = raw.lstrip("/")
+        fotos_prefix = _fotos_prefix()
+        pdfs_prefix = _pdfs_prefix()
+        if (key.startswith(f"{fotos_prefix}/") or key.startswith(f"{pdfs_prefix}/")) and _tenant_in_object_key(
+            tenant_id,
+            key,
+        ):
+            return key
+    return None
+
+
+def _is_local_stored_url(stored: str, tenant_id: UUID) -> bool:
+    raw = (stored or "").strip()
+    if not raw:
+        return False
+    for kind in ("foto", "pdf"):
+        marker = f"/api/public/reporte-local/{kind}/{tenant_id}/"
+        if marker in raw:
+            return True
+    return False
+
+
+def build_reporte_local_api_download_path(stored: str) -> str:
+    return f"/api/inventory/reporte-locales/download/file?src={quote(stored.strip(), safe='')}"
+
+
+def generate_reporte_local_signed_url(
+    stored: str,
+    tenant_id: UUID,
+    *,
+    download_filename: str,
+    expiration_minutes: int | None = None,
+) -> tuple[str, datetime | None]:
+    """URL firmada de GCS o ruta API autenticada en desarrollo local."""
+    from app.core.export_storage import generate_signed_download_url
+
+    settings = get_settings()
+    key = resolve_gcs_object_key(stored, tenant_id)
+    if key and settings.gcs_bucket:
+        url, expires_at = generate_signed_download_url(
+            key,
+            filename=download_filename,
+            expiration_minutes=expiration_minutes,
+        )
+        return url, expires_at
+
+    if _is_local_stored_url(stored, tenant_id) or read_reporte_local_file_bytes(stored, tenant_id):
+        base = (settings.public_api_base_url or "").strip().rstrip("/")
+        path = build_reporte_local_api_download_path(stored)
+        return (f"{base}{path}" if base else path), None
+
+    raise ValueError("Archivo no encontrado o no accesible")

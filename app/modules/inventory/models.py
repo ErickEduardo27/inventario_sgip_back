@@ -634,6 +634,7 @@ class InvReporteLocal(Base, TenantMixin, TimestampMixin):
     fecha_inventario_real: Mapped[date | None] = mapped_column(Date, nullable=True)
     fotos_urls: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, default=list)
     pdfs_urls: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, default=list)
+    grupo: Mapped[str | None] = mapped_column(String(50), nullable=True)
     nota: Mapped[str | None] = mapped_column(Text, nullable=True)
     situacion: Mapped[str] = mapped_column(String(32), nullable=False, default="pendiente")
 

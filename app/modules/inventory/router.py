@@ -27,6 +27,7 @@ from app.modules.inventory import descarga_archivos_service as dl_svc
 from app.modules.inventory import import_common as imp_common
 from app.modules.inventory import geo_catalog as geo
 from app.modules.inventory import models as inv_models
+from app.modules.inventory import reporte_locales_download_service as reporte_locales_dl
 from app.modules.inventory import reporte_locales_service as reporte_locales
 from app.modules.inventory import service as inv
 from app.modules.inventory.csv_export import csv_download_response
@@ -68,6 +69,9 @@ from app.modules.inventory.schemas import (
     DashboardEstablishmentStatRow,
     DashboardEstablishmentStatsResponse,
     ReporteLocalWrite,
+    ReporteLocalBulkDownloadRequest,
+    ReporteLocalSignedUrlResponse,
+    ReporteLocalSignedUrlsResponse,
     ReporteLocalesListResponse,
     InventoryUserRegistrationsResponse,
     InventoryNumWrite,
@@ -1459,6 +1463,99 @@ def reporte_locales_file_preview(
     return Response(content=data, media_type=mime)
 
 
+@router.get("/reporte-locales/download/signed-url", response_model=ReporteLocalSignedUrlResponse)
+def reporte_locales_download_signed_url(
+    src: str = Query(..., min_length=1),
+    db: Session = Depends(get_db),
+    tenant_id: UUID = Depends(get_tenant_id),
+    _: User = Depends(require_permission("reporte_locales", "view")),
+):
+    try:
+        return ReporteLocalSignedUrlResponse(**reporte_locales_dl.get_single_signed_url(db, tenant_id, src=src))
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/reporte-locales/download/file")
+def reporte_locales_download_file(
+    src: str = Query(..., min_length=1),
+    db: Session = Depends(get_db),
+    tenant_id: UUID = Depends(get_tenant_id),
+    _: User = Depends(require_permission("reporte_locales", "view")),
+):
+    """Descarga autenticada para archivos en disco local (desarrollo sin GCS)."""
+    try:
+        data, mime = reporte_locales.read_reporte_local_file_preview(src, tenant_id)
+        filename = reporte_locales_dl.resolve_stored_url_download_filename(db, tenant_id, src)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return Response(
+        content=data,
+        media_type=mime,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.get("/reporte-locales/{establishment_id}/download-urls", response_model=ReporteLocalSignedUrlsResponse)
+def reporte_locales_establishment_download_urls(
+    establishment_id: int,
+    kind: Literal["all", "fotos", "pdfs"] = Query("all"),
+    db: Session = Depends(get_db),
+    tenant_id: UUID = Depends(get_tenant_id),
+    _: User = Depends(require_permission("reporte_locales", "view")),
+):
+    try:
+        return ReporteLocalSignedUrlsResponse(
+            **reporte_locales_dl.get_establishment_signed_urls(
+                db,
+                tenant_id,
+                establishment_id,
+                kind=kind,
+            ),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/reporte-locales/download/bulk", response_model=DescargaArchivoStartResponse)
+def reporte_locales_bulk_download_start(
+    body: ReporteLocalBulkDownloadRequest,
+    db: Session = Depends(get_db),
+    tenant_id: UUID = Depends(get_tenant_id),
+    user: User = Depends(require_permission("reporte_locales", "view")),
+):
+    try:
+        return DescargaArchivoStartResponse(
+            **reporte_locales_dl.schedule_bulk_download(
+                db,
+                tenant_id=tenant_id,
+                establishment_ids=body.establishment_ids,
+                department_id=body.department_id,
+                include_fotos=body.include_fotos,
+                include_pdfs=body.include_pdfs,
+                created_by_id=user.id,
+            ),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/reporte-locales/download/bulk/{job_id}", response_model=DescargaArchivoStatus)
+def reporte_locales_bulk_download_status(
+    job_id: UUID,
+    db: Session = Depends(get_db),
+    tenant_id: UUID = Depends(get_tenant_id),
+    _: User = Depends(require_permission("reporte_locales", "view")),
+):
+    try:
+        status = dl_svc.get_descarga_archivo_status(db, job_id, tenant_id)
+        if status.get("module") != "reporte_locales":
+            raise LookupError("Trabajo de descarga no encontrado")
+        return DescargaArchivoStatus(**status)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
 @router.get("/reporte-locales/{establishment_id}/stats", response_model=DashboardEstablishmentStatRow)
 def reporte_locales_stats(
     establishment_id: int,
@@ -1520,19 +1617,40 @@ def descarga_archivo_file(
     job_id: UUID,
     db: Session = Depends(get_db),
     tenant_id: UUID = Depends(get_tenant_id),
-    _: User = Depends(require_permission("reporte_aptot", "export")),
+    user: User = Depends(get_current_user),
 ):
     """Proxy de descarga para exportaciones almacenadas en disco local (desarrollo sin GCS)."""
+    from app.modules.iam.dependencies import _has_action
+
     row = dl_svc.get_descarga_archivo(db, job_id, tenant_id)
     if row is None or row.state != "success" or not row.gcs_path:
         raise HTTPException(status_code=404, detail="Archivo no disponible")
+
+    module_perm: tuple[str, str] | None = {
+        "reporte_aptot": ("reporte_aptot", "export"),
+        "reporte_locales": ("reporte_locales", "view"),
+    }.get(row.module)
+    if module_perm is None:
+        raise HTTPException(status_code=404, detail="Archivo no disponible")
+    code, action = module_perm
+    if not _has_action(user, db, tenant_id, code, action):  # type: ignore[arg-type]
+        raise HTTPException(status_code=403, detail="No tiene permiso para esta acción")
+
     try:
         content = read_export_file(row.gcs_path)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=f"No se pudo leer el archivo: {exc}") from exc
+
+    if row.filename.lower().endswith(".zip"):
+        media_type = "application/zip"
+    elif row.filename.lower().endswith(".csv"):
+        media_type = "text/csv; charset=utf-8"
+    else:
+        media_type = "application/octet-stream"
+
     return Response(
         content=content,
-        media_type="text/csv; charset=utf-8",
+        media_type=media_type,
         headers={"Content-Disposition": f'attachment; filename="{row.filename}"'},
     )
 

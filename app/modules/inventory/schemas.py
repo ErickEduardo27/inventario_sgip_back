@@ -332,6 +332,7 @@ class ReporteLocalWrite(BaseModel):
     fecha_inventario_real: date | None = None
     fotos_urls: list[str] = Field(default_factory=list)
     pdfs_urls: list[str] = Field(default_factory=list)
+    grupo: str | None = Field(default=None, max_length=50)
     nota: str | None = None
     situacion: ReporteLocalSituacion = "pendiente"
 
@@ -344,9 +345,9 @@ class ReporteLocalWrite(BaseModel):
             return []
         return [str(x).strip() for x in v if str(x).strip()]
 
-    @field_validator("nota", mode="before")
+    @field_validator("nota", "grupo", mode="before")
     @classmethod
-    def _strip_nota(cls, v: object) -> object:
+    def _strip_optional_text(cls, v: object) -> object:
         return _empty_str_to_none(v)
 
 
@@ -358,6 +359,7 @@ class ReporteLocalRow(BaseModel):
     fecha_inventario_real: date | None = None
     fotos_urls: list[str] = Field(default_factory=list)
     pdfs_urls: list[str] = Field(default_factory=list)
+    grupo: str | None = None
     nota: str | None = None
     situacion: ReporteLocalSituacion = "pendiente"
 
@@ -365,6 +367,40 @@ class ReporteLocalRow(BaseModel):
 class ReporteLocalesListResponse(BaseModel):
     data: list[ReporteLocalRow]
     meta: PagedMeta
+
+
+ReporteLocalFileKindFilter = Literal["all", "fotos", "pdfs"]
+
+
+class ReporteLocalSignedUrlItem(BaseModel):
+    src: str
+    kind: Literal["foto", "pdf"]
+    filename: str
+    download_url: str
+    expires_at: str | None = None
+
+
+class ReporteLocalSignedUrlResponse(BaseModel):
+    src: str
+    kind: Literal["foto", "pdf"]
+    filename: str
+    download_url: str
+    expires_at: str | None = None
+
+
+class ReporteLocalSignedUrlsResponse(BaseModel):
+    establishment_id: int
+    establishment_code: str
+    items: list[ReporteLocalSignedUrlItem] = Field(default_factory=list)
+
+
+class ReporteLocalBulkDownloadRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    establishment_ids: list[int] | None = None
+    department_id: str | None = None
+    include_fotos: bool = True
+    include_pdfs: bool = True
 
 
 class AuditLogQuery(BaseModel):

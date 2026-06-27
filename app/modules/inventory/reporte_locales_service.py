@@ -42,6 +42,7 @@ def _reporte_local_row_dict(est: m.InvEstablishment, rep: m.InvReporteLocal | No
         "fecha_inventario_real": rep.fecha_inventario_real if rep else None,
         "fotos_urls": fotos,
         "pdfs_urls": pdfs,
+        "grupo": rep.grupo if rep else None,
         "nota": rep.nota if rep else None,
         "situacion": (rep.situacion if rep else "pendiente") or "pendiente",
     }
@@ -90,20 +91,80 @@ def _get_or_create_reporte_row(
     tenant_id: UUID,
     establishment_id: int,
 ) -> m.InvReporteLocal:
+    row = ensure_reporte_local_row(db, tenant_id, establishment_id)
+    return row
+
+
+def ensure_reporte_local_row(
+    db: Session,
+    tenant_id: UUID,
+    establishment_id: int,
+    *,
+    commit: bool = False,
+) -> m.InvReporteLocal:
+    """Crea fila de seguimiento por defecto si el local aún no tiene una."""
     row = db.scalar(
         select(m.InvReporteLocal).where(
             m.InvReporteLocal.tenant_id == tenant_id,
             m.InvReporteLocal.establishment_id == establishment_id,
         ),
     )
-    if row is None:
-        row = m.InvReporteLocal(
-            tenant_id=tenant_id,
-            establishment_id=establishment_id,
-            fotos_urls=[],
-            pdfs_urls=[],
-        )
+    if row is not None:
+        return row
+    row = m.InvReporteLocal(
+        tenant_id=tenant_id,
+        establishment_id=establishment_id,
+        fotos_urls=[],
+        pdfs_urls=[],
+        situacion="pendiente",
+    )
+    db.add(row)
+    if commit:
+        db.commit()
+        db.refresh(row)
+    else:
+        db.flush()
     return row
+
+
+def backfill_missing_reporte_locales(db: Session, tenant_id: UUID) -> int:
+    """Inserta filas pendientes para locales del tenant sin registro en reporte_locales."""
+    from sqlalchemy import text
+
+    result = db.execute(
+        text(
+            """
+            INSERT INTO reporte_locales (
+                tenant_id,
+                establishment_id,
+                situacion,
+                fotos_urls,
+                pdfs_urls,
+                created_at,
+                updated_at
+            )
+            SELECT
+                e.tenant_id,
+                e.id,
+                'pendiente',
+                '[]'::jsonb,
+                '[]'::jsonb,
+                NOW(),
+                NOW()
+            FROM establishments e
+            WHERE e.tenant_id = CAST(:tenant_id AS uuid)
+              AND NOT EXISTS (
+                SELECT 1
+                FROM reporte_locales r
+                WHERE r.tenant_id = e.tenant_id
+                  AND r.establishment_id = e.id
+              )
+            """
+        ),
+        {"tenant_id": str(tenant_id)},
+    )
+    db.commit()
+    return int(result.rowcount or 0)
 
 
 def upsert_reporte_local(
@@ -131,6 +192,7 @@ def upsert_reporte_local(
     row.fecha_inventario_real = body.fecha_inventario_real
     row.fotos_urls = fotos
     row.pdfs_urls = pdfs
+    row.grupo = (body.grupo or "").strip()[:50] or None
     row.nota = (body.nota or "").strip() or None
     row.situacion = situacion
     db.add(row)
