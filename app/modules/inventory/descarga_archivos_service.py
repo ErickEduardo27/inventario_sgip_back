@@ -160,12 +160,18 @@ def schedule_item_cards_export(
     *,
     tenant_id: UUID,
     q,
+    export_format: str = "csv",
     created_by_id: UUID | None = None,
 ) -> dict[str, Any]:
     from app.tasks.csv_exports import export_item_cards_csv_task
 
+    fmt = (export_format or "csv").strip().lower()
+    if fmt not in ("csv", "xlsx"):
+        fmt = "csv"
+
     job_id = uuid.uuid4()
-    filename = f"bienes_inventariados_export_{date.today().isoformat()}.csv"
+    ext = "xlsx" if fmt == "xlsx" else "csv"
+    filename = f"bienes_inventariados_export_{date.today().isoformat()}.{ext}"
     row = create_descarga_archivo(
         db,
         job_id=job_id,
@@ -177,15 +183,16 @@ def schedule_item_cards_export(
     db.commit()
 
     query_dict = q.model_dump(mode="json")
-    task = export_item_cards_csv_task.delay(str(job_id), str(tenant_id), query_dict)
+    task = export_item_cards_csv_task.delay(str(job_id), str(tenant_id), query_dict, fmt)
     set_celery_task_id(db, row, task.id)
     db.commit()
 
+    label = "Excel" if fmt == "xlsx" else "CSV"
     return {
         "success": True,
         "async_job": True,
         "job_id": str(job_id),
-        "message": "Exportación de bienes encolada. Consulte el estado para obtener el enlace de descarga.",
+        "message": f"Exportación {label} de bienes encolada. Consulte el estado para obtener el enlace de descarga.",
     }
 
 

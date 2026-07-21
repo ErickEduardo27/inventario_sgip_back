@@ -1034,10 +1034,17 @@ def item_cards_export_start(
     tenant_id: UUID = Depends(get_tenant_id),
     user: User = Depends(require_permission("bienes", "export")),
     q: RecordQuery = Depends(_q),
+    export_format: Literal["csv", "xlsx"] = Query("csv", description="Formato del archivo: csv o xlsx"),
 ):
-    """Encola exportación de bienes: Celery genera CSV, lo sube a GCS y guarda URL en ``descarga_archivos``."""
+    """Encola exportación de bienes: Celery genera CSV/XLSX, lo sube a GCS y guarda URL en ``descarga_archivos``."""
     return DescargaArchivoStartResponse(
-        **dl_svc.schedule_item_cards_export(db, tenant_id=tenant_id, q=q, created_by_id=user.id),
+        **dl_svc.schedule_item_cards_export(
+            db,
+            tenant_id=tenant_id,
+            q=q,
+            export_format=export_format,
+            created_by_id=user.id,
+        ),
     )
 
 
@@ -1716,6 +1723,8 @@ def descarga_archivo_file(
         media_type = "application/zip"
     elif row.filename.lower().endswith(".csv"):
         media_type = "text/csv; charset=utf-8"
+    elif row.filename.lower().endswith(".xlsx"):
+        media_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     else:
         media_type = "application/octet-stream"
 

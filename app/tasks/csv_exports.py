@@ -9,7 +9,7 @@ from app.celery_app import celery_app
 from app.core.export_storage import resolve_download_url, upload_export_file
 from app.db.session import SessionLocal
 from app.modules.inventory import descarga_archivos_service as dl_svc
-from app.modules.inventory.csv_export import copy_query_to_csv_bytes
+from app.modules.inventory.csv_export import copy_query_to_csv_bytes, csv_bytes_to_xlsx_bytes
 from app.modules.inventory.export_queries import build_item_cards_export_query, get_export_query
 from app.modules.inventory.schemas import RecordQuery
 
@@ -88,26 +88,47 @@ def export_reporte_aptot_csv_task(self, job_id: str, tenant_id: str) -> dict:
 
 
 @celery_app.task(bind=True, name="export.item_cards_csv")
-def export_item_cards_csv_task(self, job_id: str, tenant_id: str, query_dict: dict) -> dict:
+def export_item_cards_csv_task(
+    self,
+    job_id: str,
+    tenant_id: str,
+    query_dict: dict,
+    export_format: str = "csv",
+) -> dict:
     job_uuid = UUID(job_id)
     tenant_uuid = UUID(tenant_id)
     q = RecordQuery.model_validate(query_dict)
+    fmt = (export_format or "csv").strip().lower()
+    if fmt not in ("csv", "xlsx"):
+        fmt = "csv"
 
     try:
         with SessionLocal() as db:
             row = dl_svc.get_descarga_archivo(db, job_uuid, tenant_uuid)
             if row is None:
                 return {"success": False, "message": "Trabajo de descarga no encontrado"}
-            dl_svc.mark_processing(db, row)
+            dl_svc.mark_processing(
+                db,
+                row,
+                message="Generando Excel…" if fmt == "xlsx" else "Generando CSV…",
+            )
             db.commit()
 
-        self.update_state(state="PROGRESS", meta=_progress_meta(10, "Generando CSV…"))
+        self.update_state(
+            state="PROGRESS",
+            meta=_progress_meta(10, "Generando Excel…" if fmt == "xlsx" else "Generando CSV…"),
+        )
 
         inner_sql, params, filename_base = build_item_cards_export_query(tenant_uuid, q)
         stamp = date.today().isoformat()
-        filename = f"{filename_base}_{stamp}.csv"
+        ext = "xlsx" if fmt == "xlsx" else "csv"
+        filename = f"{filename_base}_{stamp}.{ext}"
         payload = copy_query_to_csv_bytes(inner_sql, params)
-        content = b"\xef\xbb\xbf" + payload
+        if fmt == "xlsx":
+            self.update_state(state="PROGRESS", meta=_progress_meta(45, "Convirtiendo a Excel…"))
+            content = csv_bytes_to_xlsx_bytes(payload)
+        else:
+            content = b"\xef\xbb\xbf" + payload
 
         self.update_state(
             state="PROGRESS",

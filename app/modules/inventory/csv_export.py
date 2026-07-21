@@ -51,6 +51,17 @@ def copy_query_to_csv_bytes(inner_sql: str, params: tuple) -> bytes:
         conn.close()
 
 
+def csv_bytes_to_xlsx_bytes(csv_payload: bytes) -> bytes:
+    """Convierte CSV UTF-8 (con o sin BOM) a libro Excel (.xlsx)."""
+    import pandas as pd
+
+    text = csv_payload.decode("utf-8-sig", errors="replace")
+    df = pd.read_csv(io.StringIO(text))
+    out = io.BytesIO()
+    df.to_excel(out, index=False, engine="openpyxl")
+    return out.getvalue()
+
+
 def csv_download_response(
     db: Session,
     *,
