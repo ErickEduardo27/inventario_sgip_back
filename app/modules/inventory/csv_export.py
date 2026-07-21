@@ -2,6 +2,7 @@
 
 import io
 import logging
+import re
 from datetime import date
 from typing import Any
 from uuid import UUID
@@ -12,6 +13,9 @@ from sqlalchemy.orm import Session
 from app.db.session import engine
 
 logger = logging.getLogger(__name__)
+
+# Caracteres de control prohibidos en celdas Excel/OpenXML (p. ej. GS1 \x1d en códigos de barras).
+_EXCEL_ILLEGAL_CHARACTERS_RE = re.compile(r"[\000-\010]|[\013-\014]|[\016-\037]")
 
 def copy_query_to_csv_bytes(inner_sql: str, params: tuple) -> bytes:
     """Ejecuta COPY (SELECT …) TO STDOUT WITH CSV HEADER."""
@@ -51,12 +55,19 @@ def copy_query_to_csv_bytes(inner_sql: str, params: tuple) -> bytes:
         conn.close()
 
 
+def _sanitize_excel_value(value: object) -> object:
+    if not isinstance(value, str):
+        return value
+    return _EXCEL_ILLEGAL_CHARACTERS_RE.sub("", value)
+
+
 def csv_bytes_to_xlsx_bytes(csv_payload: bytes) -> bytes:
     """Convierte CSV UTF-8 (con o sin BOM) a libro Excel (.xlsx)."""
     import pandas as pd
 
     text = csv_payload.decode("utf-8-sig", errors="replace")
     df = pd.read_csv(io.StringIO(text))
+    df = df.map(_sanitize_excel_value)
     out = io.BytesIO()
     df.to_excel(out, index=False, engine="openpyxl")
     return out.getvalue()
