@@ -722,7 +722,7 @@ def generate_ficha_pdf(db: Session, tenant_id: UUID, card_id: int) -> tuple[byte
     legend = (
         "Estado (EST): Bueno: B=, Regular: R, Malo: M, RAEE:X, Chatarra/Inservible: Y | "
         "Medida(metros): L=Largo, A=Ancho, H=Alto / Capacidad / Potencia / Pulgadas / Etc. "
-        "Utilización (USO):USO: U, DESUSO: D Nota: 1.El usuario declara haber mostrado todos los bienes "
+        "Utilización (USO):USO: S, DESUSO: N Nota: 1.El usuario declara haber mostrado todos los bienes "
         "patrimoniales que se encuentran bajo su responsabilidad y no contar con más bienes patrimoniales "
         "materia de inventario. "
         "2. El usuario es responsable de la permanencia y conservación de cada uno de los bienes muebles "

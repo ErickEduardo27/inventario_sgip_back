@@ -27,13 +27,13 @@ from app.modules.inventory import descarga_archivos_service as dl_svc
 from app.modules.inventory import import_common as imp_common
 from app.modules.inventory import geo_catalog as geo
 from app.modules.inventory import models as inv_models
+from app.modules.inventory import reporte_locales_cronograma_import as rl_cronograma_import
 from app.modules.inventory import reporte_locales_download_service as reporte_locales_dl
 from app.modules.inventory import reporte_locales_service as reporte_locales
 from app.modules.inventory import service as inv
 from app.modules.inventory.csv_export import csv_download_response
 from app.modules.inventory.export_queries import (
     build_cards_export_query,
-    build_item_cards_export_query,
     build_margesi_export_query,
     get_export_query,
 )
@@ -69,6 +69,8 @@ from app.modules.inventory.schemas import (
     DashboardEstablishmentStatRow,
     DashboardEstablishmentStatsResponse,
     ReporteLocalWrite,
+    ActaCierrePdfRequest,
+    ReporteLocalCronogramaImportResult,
     ReporteLocalBulkDownloadRequest,
     ReporteLocalSignedUrlResponse,
     ReporteLocalSignedUrlsResponse,
@@ -134,6 +136,10 @@ def _q(
         description="Margesi: C conciliados, F faltantes, N no inventariable. Bienes: C/S",
     ),
     local_code: str | None = Query(None, description="Filtrar margesi por amb_cod = código de local"),
+    export_layout: Literal["full", "report"] | None = Query(
+        None,
+        description="Export margesi: full=todas las columnas; report=layout operativo",
+    ),
 ) -> RecordQuery:
     return RecordQuery(
         page=page,
@@ -147,6 +153,7 @@ def _q(
         flag_firma=flag_firma,
         inv_sit_filter=inv_sit_filter,
         local_code=local_code,
+        export_layout=export_layout,
     )
 
 
@@ -156,8 +163,9 @@ def _item_photo_q(
     column: str = Query("mar_des"),
     value: str | None = Query(None),
     search: str | None = Query(None, description="Búsqueda por N° inventario, SBN, descripción o hoja"),
+    establishment_id: int | None = Query(None, description="Filtrar fotos por local"),
     column_ord: str | None = Query(None, alias="columnOrd"),
-    ord_tipo: str = Query("desc", alias="ordTipo"),
+    ord_tipo: str = Query("asc", alias="ordTipo"),
     inv_sit_filter: Literal["C", "S"] | None = Query(
         None,
         description="Filtrar bienes: C conciliados, S sobrantes",
@@ -170,6 +178,7 @@ def _item_photo_q(
         column=column,
         value=value,
         search=search,
+        establishment_id=establishment_id,
         column_ord=column_ord,
         ord_tipo=ord_tipo,
         inv_sit_filter=inv_sit_filter,
@@ -1019,25 +1028,30 @@ def item_cards_records(
     return PagedRows(data=rows, meta=PagedMeta(**inv.paged_meta(total, q.page, q.per_page)))
 
 
-@router.get("/item-cards/export")
-def item_cards_export(
+@router.post("/item-cards/export", response_model=DescargaArchivoStartResponse)
+def item_cards_export_start(
     db: Session = Depends(get_db),
     tenant_id: UUID = Depends(get_tenant_id),
+    user: User = Depends(require_permission("bienes", "export")),
     q: RecordQuery = Depends(_q),
+):
+    """Encola exportación de bienes: Celery genera CSV, lo sube a GCS y guarda URL en ``descarga_archivos``."""
+    return DescargaArchivoStartResponse(
+        **dl_svc.schedule_item_cards_export(db, tenant_id=tenant_id, q=q, created_by_id=user.id),
+    )
+
+
+@router.get("/item-cards/export/{job_id}", response_model=DescargaArchivoStatus)
+def item_cards_export_status(
+    job_id: UUID,
+    db: Session = Depends(get_db),
+    tenant_id: UUID = Depends(get_tenant_id),
     _: User = Depends(require_permission("bienes", "export")),
 ):
-    """Export CSV de bienes; acepta filtros del listado (COPY en PostgreSQL)."""
     try:
-        inner_sql, params, filename_base = build_item_cards_export_query(tenant_id, q)
-        return csv_download_response(
-            db,
-            tenant_id=tenant_id,
-            inner_sql=inner_sql,
-            filename_base=filename_base,
-            params=params,
-        )
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail=f"Error al exportar CSV: {exc}") from exc
+        return DescargaArchivoStatus(**dl_svc.get_descarga_archivo_status(db, job_id, tenant_id))
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @router.get("/item-cards/{row_id}")
@@ -1393,6 +1407,23 @@ def reporte_locales_save(
     return OkPayload(success=True, message="Seguimiento del local guardado")
 
 
+@router.post("/reporte-locales/import-cronograma", response_model=ReporteLocalCronogramaImportResult)
+async def reporte_locales_import_cronograma(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    tenant_id: UUID = Depends(get_tenant_id),
+    _: User = Depends(require_permission("reporte_locales", "edit")),
+):
+    try:
+        content, filename = await imp_common.read_upload_bytes(file)
+        result = rl_cronograma_import.bulk_import_cronograma(db, tenant_id, content, filename)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not result.get("success") and result.get("errors"):
+        raise HTTPException(status_code=400, detail=result["errors"][0])
+    return ReporteLocalCronogramaImportResult(**result)
+
+
 @router.post("/reporte-locales/uploads/{establishment_id}/foto", response_model=ItemPhotoUploadResult)
 async def reporte_locales_upload_foto(
     establishment_id: int,
@@ -1569,6 +1600,33 @@ def reporte_locales_stats(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
+@router.post("/reporte-locales/{establishment_id}/pdf-acta-cierre")
+def reporte_locales_pdf_acta_cierre(
+    establishment_id: int,
+    body: ActaCierrePdfRequest,
+    db: Session = Depends(get_db),
+    tenant_id: UUID = Depends(get_tenant_id),
+    _: User = Depends(require_permission("reporte_locales", "view")),
+):
+    """Genera PDF del Anexo 005 – Acta de Cierre para un local."""
+    try:
+        pdf_bytes, filename = reporte_locales.build_acta_cierre_pdf(
+            db,
+            tenant_id,
+            establishment_id,
+            body,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"Error al generar acta de cierre: {exc}") from exc
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
 @router.get("/reporte-aptot/cache-meta")
 def reporte_aptot_cache_meta(
     db: Session = Depends(get_db),
@@ -1629,6 +1687,7 @@ def descarga_archivo_file(
     module_perm: tuple[str, str] | None = {
         "reporte_aptot": ("reporte_aptot", "export"),
         "reporte_locales": ("reporte_locales", "view"),
+        "item_cards": ("bienes", "export"),
     }.get(row.module)
     if module_perm is None:
         raise HTTPException(status_code=404, detail="Archivo no disponible")

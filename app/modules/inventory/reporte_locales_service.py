@@ -16,7 +16,8 @@ from app.core.reporte_local_storage import (
     upload_reporte_local_pdf,
 )
 from app.modules.inventory import models as m
-from app.modules.inventory.schemas import ReporteLocalWrite
+from app.modules.inventory.geo_models import InvDepartment, InvDistrict, InvProvince
+from app.modules.inventory.schemas import ActaCierrePdfRequest, ReporteLocalWrite
 from app.modules.inventory.service import paged_meta
 
 
@@ -40,6 +41,8 @@ def _reporte_local_row_dict(est: m.InvEstablishment, rep: m.InvReporteLocal | No
         "establishment_description": est.description,
         "fecha_inventario_propuesto": rep.fecha_inventario_propuesto if rep else None,
         "fecha_inventario_real": rep.fecha_inventario_real if rep else None,
+        "fecha_inicio_cronograma": rep.fecha_inicio_cronograma if rep else None,
+        "fecha_cierre_cronograma": rep.fecha_cierre_cronograma if rep else None,
         "fotos_urls": fotos,
         "pdfs_urls": pdfs,
         "grupo": rep.grupo if rep else None,
@@ -190,6 +193,8 @@ def upsert_reporte_local(
     row = _get_or_create_reporte_row(db, tenant_id, body.establishment_id)
     row.fecha_inventario_propuesto = body.fecha_inventario_propuesto
     row.fecha_inventario_real = body.fecha_inventario_real
+    row.fecha_inicio_cronograma = body.fecha_inicio_cronograma
+    row.fecha_cierre_cronograma = body.fecha_cierre_cronograma
     row.fotos_urls = fotos
     row.pdfs_urls = pdfs
     row.grupo = (body.grupo or "").strip()[:50] or None
@@ -270,3 +275,76 @@ def get_reporte_local_stats(
         raise ValueError("Local no encontrado")
 
     return get_establishment_stats_live(db, tenant_id, establishment_id)
+
+
+def _geo_description(db: Session, model: type, geo_id: str | None) -> str:
+    if not geo_id:
+        return ""
+    row = db.get(model, geo_id)
+    return str(row.description or "").strip() if row else ""
+
+
+def build_acta_cierre_pdf(
+    db: Session,
+    tenant_id: UUID,
+    establishment_id: int,
+    body: ActaCierrePdfRequest,
+) -> tuple[bytes, str]:
+    """Arma datos del acta desde local, seguimiento y estadísticas; genera PDF."""
+    from app.modules.inventory.acta_cierre_pdf import generate_acta_cierre_pdf
+
+    est = db.get(m.InvEstablishment, establishment_id)
+    if not est or est.tenant_id != tenant_id:
+        raise ValueError("Local no encontrado")
+
+    rep = db.scalar(
+        select(m.InvReporteLocal).where(
+            m.InvReporteLocal.tenant_id == tenant_id,
+            m.InvReporteLocal.establishment_id == establishment_id,
+        )
+    )
+
+    stats = get_reporte_local_stats(db, tenant_id, establishment_id)
+    dept_name = _geo_description(db, InvDepartment, est.department_id)
+    prov_name = _geo_description(db, InvProvince, est.province_id)
+    dist_name = _geo_description(db, InvDistrict, est.district_id)
+
+    conforme = int(stats.get("margesi_conciliado") or 0)
+    sobrantes = int(stats.get("inventario_sobrante") or 0)
+
+    fecha = rep.fecha_inventario_real if rep and rep.fecha_inventario_real else None
+
+    nota_sistema = str(rep.nota or "").strip() if rep else ""
+    obs_adicionales = str(body.observaciones or "").strip()
+    if nota_sistema and obs_adicionales:
+        observaciones = f"{nota_sistema}\n\n{obs_adicionales}"
+    else:
+        observaciones = nota_sistema or obs_adicionales or None
+
+    payload: dict[str, Any] = {
+        "establishment_code": est.code,
+        "establishment_description": est.description,
+        "sede_grupo": (rep.grupo if rep else None) or "",
+        "fecha": fecha,
+        "hora": body.hora,
+        "macroregion": dept_name,
+        "departamento": dept_name,
+        "provincia": prov_name,
+        "distrito": dist_name,
+        "oficina_sede": est.description,
+        "representantes_banco": body.representantes_banco,
+        "representante_sertec": body.representante_sertec,
+        "total_bd": int(stats.get("margesi_total") or 0),
+        "conforme": conforme,
+        "faltantes": int(stats.get("margesi_faltantes") or 0),
+        "sobrantes": sobrantes,
+        "total_inventariados": conforme + sobrantes,
+        "bn_nombre": body.bn_nombre,
+        "bn_cargo": body.bn_cargo,
+        "bn_dni": body.bn_dni,
+        "sertec_nombre": body.sertec_nombre,
+        "sertec_cargo": body.sertec_cargo,
+        "sertec_dni": body.sertec_dni,
+        "observaciones": observaciones,
+    }
+    return generate_acta_cierre_pdf(payload)

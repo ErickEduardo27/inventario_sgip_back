@@ -155,6 +155,40 @@ def schedule_reporte_aptot_export(
     }
 
 
+def schedule_item_cards_export(
+    db: Session,
+    *,
+    tenant_id: UUID,
+    q,
+    created_by_id: UUID | None = None,
+) -> dict[str, Any]:
+    from app.tasks.csv_exports import export_item_cards_csv_task
+
+    job_id = uuid.uuid4()
+    filename = f"bienes_inventariados_export_{date.today().isoformat()}.csv"
+    row = create_descarga_archivo(
+        db,
+        job_id=job_id,
+        tenant_id=tenant_id,
+        module="item_cards",
+        filename=filename,
+        created_by_id=created_by_id,
+    )
+    db.commit()
+
+    query_dict = q.model_dump(mode="json")
+    task = export_item_cards_csv_task.delay(str(job_id), str(tenant_id), query_dict)
+    set_celery_task_id(db, row, task.id)
+    db.commit()
+
+    return {
+        "success": True,
+        "async_job": True,
+        "job_id": str(job_id),
+        "message": "Exportación de bienes encolada. Consulte el estado para obtener el enlace de descarga.",
+    }
+
+
 def get_descarga_archivo_status(db: Session, job_id: UUID, tenant_id: UUID) -> dict[str, Any]:
     row = get_descarga_archivo(db, job_id, tenant_id)
     if row is None:

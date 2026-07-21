@@ -10,9 +10,66 @@ from app.modules.inventory import models as m
 from app.modules.inventory.schemas import RecordQuery
 
 
+def _item_photo_filename_sql(extra_key: str, legacy_key: str, alias: str) -> str:
+    """Nombre de archivo de foto almacenada en ``itemcards.extra`` (URL GCS, ruta o nombre)."""
+    raw = f"NULLIF(TRIM(COALESCE(ic.extra->>'{extra_key}', ic.extra->>'{legacy_key}', '')), '')"
+    path = f"split_part({raw}, '?', 1)"
+    filename = f"reverse(split_part(reverse({path}), '/', 1))"
+    return f"""CASE
+        WHEN {raw} IS NULL THEN ''
+        ELSE COALESCE({filename}, '')
+    END AS {alias}"""
+
+
 def _margesi_column_list() -> str:
     cols = [c.name for c in m.InvMargesiItem.__table__.columns if c.name != "tenant_id"]
     return ", ".join(f"m.{c}" for c in cols)
+
+
+def _margesi_report_select_sql() -> str:
+    return """
+        COALESCE(m.mar_sit_conta, '') AS "Sit.Contable",
+        COALESCE(m.inv_num_1::text, '') AS "Inv -1",
+        COALESCE(m.inv_num_2::text, '') AS "Inv -2",
+        COALESCE(m.inv_num::text, '') AS "N Inventario",
+        COALESCE(m.mar_num, '') AS "Cod.Interno",
+        COALESCE(m.mar_cpat, '') AS "Cod.SBN",
+        COALESCE(m.mar_des, '') AS "Descripcion",
+        COALESCE(m.mar_esp, '') AS "Especificacion",
+        COALESCE(m.mar_est::text, '') AS "Estado",
+        COALESCE(m.mar_uso::text, '') AS "Uso",
+        COALESCE(m.mar_col, '') AS "Color",
+        COALESCE(m.mar_mar, '') AS "Marca",
+        COALESCE(m.mar_mod, '') AS "Modelo",
+        COALESCE(m.mar_ser, '') AS "Serie",
+        COALESCE(m.mar_med, '') AS "Medidas",
+        COALESCE(m.mar_obs, '') AS "Observacion",
+        COALESCE(m.mar_ano, '') AS "Año",
+        COALESCE(m.mar_npla, '') AS "Placa",
+        COALESCE(m.mar_nmot, '') AS "N Motor",
+        COALESCE(m.mar_ncha, '') AS "N Chasis",
+        COALESCE(est.code, m.amb_cod, '') AS "Cod.Local",
+        COALESCE(est.description, '') AS "Local",
+        COALESCE(m.local_libre, '') AS "Local Libre",
+        COALESCE(
+            CASE
+                WHEN m.extra IS NULL
+                  OR TRIM(COALESCE(m.extra, '')) = ''
+                  OR UPPER(TRIM(m.extra)) = 'NULL'
+                THEN NULL
+                ELSE (m.extra::jsonb)->>'piso_libre'
+            END,
+            ''
+        ) AS "Piso Libre",
+        COALESCE(m.ambiente_libre, '') AS "Ambiente Libre",
+        COALESCE(m.usuario_libre, '') AS "Usuario Libre",
+        COALESCE(m.ccosto_libre, '') AS "Centro Costo Libre",
+        COALESCE(m.mar_cont_doc, '') AS "Documento Contable",
+        COALESCE(to_char(m.mar_cont_fec, 'YYYY-MM-DD'), '') AS "Fecha Contable",
+        COALESCE(m.mar_ing_val::text, '') AS "Valor Adquisicion",
+        COALESCE(m.mar_dep_acum::text, '') AS "Depreciacion Acumulada",
+        COALESCE(m.mar_net_val::text, '') AS "Valor Neto"
+    """
 
 
 EXPORT_QUERIES: dict[str, tuple[str, str]] = {
@@ -182,7 +239,7 @@ EXPORT_QUERIES["cards"] = (
     "hoja_captura_export",
 )
 
-_ITEM_CARDS_EXPORT_SELECT = """
+_ITEM_CARDS_EXPORT_SELECT = f"""
         SELECT
             ic.id AS id_bien,
             COALESCE(c.hoj_num::text, '') AS numero_hoja,
@@ -218,6 +275,9 @@ _ITEM_CARDS_EXPORT_SELECT = """
             COALESCE(cc.description, '') AS centro_costo,
             COALESCE(p.number, '') AS documento_usuario,
             COALESCE(p.name, '') AS usuario,
+            {_item_photo_filename_sql("mar_foto", "foto_bien", "foto_1")},
+            {_item_photo_filename_sql("mar_foto2", "foto2_bien", "foto_2")},
+            {_item_photo_filename_sql("mar_foto3", "foto3_bien", "foto_3")},
             to_char(ic.created_at AT TIME ZONE 'America/Lima', 'DD/MM/YYYY HH24:MI') AS fecha_creacion
         FROM itemcards ic
         LEFT JOIN cards c ON c.id = ic.id_card AND c.tenant_id = ic.tenant_id
@@ -360,8 +420,14 @@ def build_cards_export_query(tenant_id: UUID, q: RecordQuery) -> tuple[str, tupl
     return sql, tuple(params), "hoja_captura_export"
 
 
-def build_margesi_export_query(tenant_id: UUID, q: RecordQuery) -> tuple[str, tuple[Any, ...], str]:
+def build_margesi_export_query(
+    tenant_id: UUID,
+    q: RecordQuery,
+    *,
+    layout: str | None = None,
+) -> tuple[str, tuple[Any, ...], str]:
     """SQL parametrizado para exportar margesi con los mismos filtros que el listado."""
+    export_layout = layout or q.export_layout or "full"
     where = ["m.tenant_id = %s::uuid"]
     params: list[Any] = [str(tenant_id)]
     allowed = {"inv_num", "mar_cpat", "mar_des", "inv_sit", "mar_num", "mar_mar", "mar_mod", "inv_hoj"}
@@ -397,15 +463,30 @@ def build_margesi_export_query(tenant_id: UUID, q: RecordQuery) -> tuple[str, tu
         where.append(f"m.{col} ILIKE %s")
         params.append(f"%{q.value}%")
 
-    sql = f"""
-        SELECT
+    if export_layout == "report":
+        select_sql = _margesi_report_select_sql()
+        from_sql = """
+        FROM margesi m
+        LEFT JOIN establishments est
+            ON est.tenant_id = m.tenant_id AND est.code = m.amb_cod
+        """
+        filename_base = "margesi_reporte"
+    else:
+        select_sql = f"""
             {_margesi_column_list()},
             COALESCE(m.extra::text, '') AS extra_json
-        FROM margesi m
+        """
+        from_sql = "FROM margesi m"
+        filename_base = "margesi_export"
+
+    sql = f"""
+        SELECT
+            {select_sql}
+        {from_sql}
         WHERE {' AND '.join(where)}
         ORDER BY m.id
     """
-    return sql, tuple(params), "margesi_export"
+    return sql, tuple(params), filename_base
 
 
 def build_item_cards_export_query(tenant_id: UUID, q: RecordQuery) -> tuple[str, tuple[Any, ...], str]:

@@ -252,6 +252,10 @@ class RecordQuery(BaseModel):
         default=None,
         description="Filtrar margesi donde amb_cod coincide con el código del local",
     )
+    export_layout: Literal["full", "report"] | None = Field(
+        default=None,
+        description="Export margesi: full=todas las columnas; report=layout operativo",
+    )
 
 
 class ItemPhotoQuery(RecordQuery):
@@ -330,6 +334,8 @@ class ReporteLocalWrite(BaseModel):
     establishment_id: int
     fecha_inventario_propuesto: date | None = None
     fecha_inventario_real: date | None = None
+    fecha_inicio_cronograma: date | None = None
+    fecha_cierre_cronograma: date | None = None
     fotos_urls: list[str] = Field(default_factory=list)
     pdfs_urls: list[str] = Field(default_factory=list)
     grupo: str | None = Field(default=None, max_length=50)
@@ -357,6 +363,8 @@ class ReporteLocalRow(BaseModel):
     establishment_description: str | None = None
     fecha_inventario_propuesto: date | None = None
     fecha_inventario_real: date | None = None
+    fecha_inicio_cronograma: date | None = None
+    fecha_cierre_cronograma: date | None = None
     fotos_urls: list[str] = Field(default_factory=list)
     pdfs_urls: list[str] = Field(default_factory=list)
     grupo: str | None = None
@@ -367,6 +375,18 @@ class ReporteLocalRow(BaseModel):
 class ReporteLocalesListResponse(BaseModel):
     data: list[ReporteLocalRow]
     meta: PagedMeta
+
+
+class ReporteLocalCronogramaImportResult(BaseModel):
+    """Resultado importación fechas de cronograma (total incluye fila de encabezado)."""
+
+    success: bool
+    message: str
+    total: int = 0
+    registered: int = 0
+    inserted: int = 0
+    updated: int = 0
+    errors: list[str] = Field(default_factory=list)
 
 
 ReporteLocalFileKindFilter = Literal["all", "fotos", "pdfs"]
@@ -392,6 +412,40 @@ class ReporteLocalSignedUrlsResponse(BaseModel):
     establishment_id: int
     establishment_code: str
     items: list[ReporteLocalSignedUrlItem] = Field(default_factory=list)
+
+
+class ActaCierrePdfRequest(BaseModel):
+    """Solo campos que el usuario completa al firmar el acta."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    hora: str | None = None
+    representantes_banco: str | None = None
+    representante_sertec: str | None = None
+    bn_nombre: str | None = None
+    bn_cargo: str | None = None
+    bn_dni: str | None = None
+    sertec_nombre: str | None = None
+    sertec_cargo: str | None = None
+    sertec_dni: str | None = None
+    observaciones: str | None = None
+
+    @field_validator(
+        "hora",
+        "representantes_banco",
+        "representante_sertec",
+        "bn_nombre",
+        "bn_cargo",
+        "bn_dni",
+        "sertec_nombre",
+        "sertec_cargo",
+        "sertec_dni",
+        "observaciones",
+        mode="before",
+    )
+    @classmethod
+    def _strip_acta_fields(cls, v: object) -> object:
+        return _empty_str_to_none(v)
 
 
 class ReporteLocalBulkDownloadRequest(BaseModel):

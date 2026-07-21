@@ -1863,6 +1863,7 @@ SELECT
     photo.photo_url
 FROM itemcards ic
 JOIN cards c ON c.id = ic.id_card AND c.tenant_id = ic.tenant_id
+LEFT JOIN enviroments env ON env.id = c.id_ambiente AND env.tenant_id = c.tenant_id
 CROSS JOIN LATERAL (
     SELECT slot, photo_url FROM (VALUES
         (1, NULLIF(TRIM(COALESCE(ic.extra->>'mar_foto', ic.extra->>'foto_bien', '')), '')),
@@ -1886,6 +1887,10 @@ def _item_photos_where(q: ItemPhotoQuery) -> tuple[str, dict[str, Any]]:
     if q.inv_sit_filter in ("C", "S"):
         clauses.append("ic.inv_sit = :inv_sit_filter")
         params["inv_sit_filter"] = q.inv_sit_filter
+
+    if q.establishment_id is not None:
+        clauses.append("env.establishment_id = :establishment_id")
+        params["establishment_id"] = q.establishment_id
 
     term = (q.search or "").strip()
     if term:
@@ -1933,10 +1938,19 @@ def list_item_photos(db: Session, tenant_id: UUID, q: ItemPhotoQuery) -> tuple[l
     count_sql = text(f"SELECT COUNT(*) FROM ({_ITEM_PHOTOS_SELECT}{where_sql}) sub")
     total = int(db.scalar(count_sql, base_params) or 0)
 
-    order_dir = "DESC" if (q.ord_tipo or "desc").lower() == "desc" else "ASC"
+    order_col = (q.column_ord or "inv_num").strip()
+    order_map = {
+        "inv_num": "ic.inv_num",
+        "mar_des": "ic.mar_des",
+        "mar_cpat": "ic.mar_cpat",
+        "hoj_num": "c.hoj_num",
+        "id": "ic.id",
+    }
+    order_expr = order_map.get(order_col, "ic.inv_num")
+    order_dir = "DESC" if (q.ord_tipo or "asc").lower() == "desc" else "ASC"
     offset = (q.page - 1) * q.per_page
     data_sql = text(
-        f"{_ITEM_PHOTOS_SELECT}{where_sql} ORDER BY ic.id {order_dir}, photo.slot ASC "
+        f"{_ITEM_PHOTOS_SELECT}{where_sql} ORDER BY {order_expr} {order_dir} NULLS LAST, photo.slot ASC "
         f"LIMIT :limit OFFSET :offset"
     )
     rows = db.execute(
