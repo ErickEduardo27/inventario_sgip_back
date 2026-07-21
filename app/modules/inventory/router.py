@@ -1041,6 +1041,18 @@ def item_cards_export_start(
     )
 
 
+@router.get("/item-cards/export")
+def item_cards_export_get_not_allowed():
+    """Evita que GET /export caiga en ``/item-cards/{row_id}`` con row_id='export'."""
+    raise HTTPException(
+        status_code=405,
+        detail=(
+            "La exportación de bienes es asíncrona. Use POST /api/inventory/item-cards/export "
+            "para encolar el trabajo y consulte GET /item-cards/export/{job_id} para el estado."
+        ),
+    )
+
+
 @router.get("/item-cards/export/{job_id}", response_model=DescargaArchivoStatus)
 def item_cards_export_status(
     job_id: UUID,
