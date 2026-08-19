@@ -12,6 +12,7 @@ from app.modules.catalog import models as catalog_models  # noqa: F401
 from app.modules.contacts import models as contacts_models  # noqa: F401
 from app.modules.iam import models as iam_models  # noqa: F401
 from app.modules.inventory import geo_models as inventory_geo_models  # noqa: F401
+from app.modules.inventory import attendance_models as inventory_attendance_models  # noqa: F401
 from app.modules.inventory import models as inventory_models  # noqa: F401
 from app.modules.omnichannel import models as omnichannel_models  # noqa: F401
 from app.modules.scheduled_messages import models as scheduled_messages_models  # noqa: F401

@@ -130,7 +130,7 @@ IMPORT_COLUMN_BY_INDEX: tuple[str, ...] = (
 
 IMPORT_EXCEL_DATE_INDEXES = frozenset({59})  # solo ``mar_cont_fec`` convierte serial Excel
 
-_EXTRA_ONLY_KEYS = frozenset({"list_sbn_id", "cat_ultimo", "flag_depreciacion", "flag_etiquetado", "contabilidad"})
+_EXTRA_ONLY_KEYS = frozenset({"list_sbn_id", "cat_ultimo", "flag_depreciacion", "contabilidad"})
 
 _PHYSICAL_COLS = frozenset(all_margesi_column_names())
 

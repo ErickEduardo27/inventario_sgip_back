@@ -129,7 +129,6 @@ def generate_acta_cierre_pdf(payload: dict[str, Any]) -> tuple[bytes, str]:
     st = _styles()
     code = _cell(payload.get("establishment_code"))
     description = _cell(payload.get("establishment_description"))
-    grupo = _cell(payload.get("sede_grupo"))
     day, month, year = _format_acta_date(payload.get("fecha"))
     hora = _cell(payload.get("hora"), empty="……")
     macro = _cell(payload.get("macroregion"))
@@ -139,7 +138,7 @@ def generate_acta_cierre_pdf(payload: dict[str, Any]) -> tuple[bytes, str]:
     oficina = _cell(payload.get("oficina_sede"), empty=description or "……………………")
     reps_banco = _cell(payload.get("representantes_banco"))
     rep_sertec = _cell(payload.get("representante_sertec"))
-    sede_label = f"{code} - {description}".strip(" -")
+    sede_label = f"{code} - {description}".strip(" -") if description else code
 
     total_bd = int(payload.get("total_bd") or 0)
     conforme = int(payload.get("conforme") or 0)
@@ -162,7 +161,7 @@ def generate_acta_cierre_pdf(payload: dict[str, Any]) -> tuple[bytes, str]:
         ),
         Paragraph("ACTA DE CIERRE", st["subtitle"]),
         Paragraph(
-            f"SEDE ( {_esc(grupo)} ) &nbsp;&nbsp; {_esc(sede_label)}",
+            f"SEDE ( {_esc(code)} ) &nbsp;&nbsp; {_esc(description or sede_label)}",
             st["center"],
         ),
         Spacer(1, 4),
@@ -273,19 +272,24 @@ def generate_acta_cierre_pdf(payload: dict[str, Any]) -> tuple[bytes, str]:
         )
     )
 
+    sign_rows = [
+        ["BANCO DE LA NACION", "SERTEC"],
+        ["Nombre", "Nombre"],
+        [_esc(bn_nombre), _esc(sertec_nombre)],
+        ["Cargo", "Cargo"],
+        [_esc(bn_cargo), _esc(sertec_cargo)],
+        ["Código/DNI", "DNI"],
+        [_esc(bn_dni), _esc(sertec_dni)],
+        ["(Firma y Sello)", "(Firma)"],
+        ["", ""],
+        ["", ""],
+        ["", ""],
+    ]
+    sign_row_heights = [None] * 7 + [8 * mm, 16 * mm, 16 * mm, 16 * mm]
     sign_table = Table(
-        [
-            ["BANCO DE LA NACION", "SERTEC"],
-            ["Nombre", "Nombre"],
-            [_esc(bn_nombre), _esc(sertec_nombre)],
-            ["Cargo", "Cargo"],
-            [_esc(bn_cargo), _esc(sertec_cargo)],
-            ["Código/DNI", "DNI"],
-            [_esc(bn_dni), _esc(sertec_dni)],
-            ["(Firma y Sello)", "(Firma)"],
-            ["", ""],
-        ],
+        sign_rows,
         colWidths=[CONTENT_W * 0.5, CONTENT_W * 0.5],
+        rowHeights=sign_row_heights,
     )
     sign_table.setStyle(
         TableStyle(
@@ -294,13 +298,16 @@ def generate_acta_cierre_pdf(payload: dict[str, Any]) -> tuple[bytes, str]:
                 ("FONTNAME", (0, 1), (-1, -1), FONT),
                 ("FONTSIZE", (0, 0), (-1, -1), 9),
                 ("ALIGN", (0, 0), (-1, -1), "CENTER"),
-                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                ("VALIGN", (0, 0), (-1, 6), "MIDDLE"),
+                ("VALIGN", (0, 7), (-1, -1), "TOP"),
                 ("GRID", (0, 0), (-1, -1), BORDER, LINE_COLOR),
                 ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#F5E6D3")),
-                ("TOPPADDING", (0, 0), (-1, -1), 4),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
-                ("SPAN", (0, 7), (0, 8)),
-                ("SPAN", (1, 7), (1, 8)),
+                ("TOPPADDING", (0, 0), (-1, 6), 4),
+                ("BOTTOMPADDING", (0, 0), (-1, 6), 4),
+                ("TOPPADDING", (0, 7), (-1, -1), 6),
+                ("BOTTOMPADDING", (0, 7), (-1, -1), 6),
+                ("SPAN", (0, 8), (0, 10)),
+                ("SPAN", (1, 8), (1, 10)),
             ]
         )
     )

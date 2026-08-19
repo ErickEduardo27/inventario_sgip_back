@@ -374,8 +374,116 @@ EXPORT_QUERIES.update({
 })
 
 
+_REPORTE_APTOT_CACHE_COLUMNS = """
+            source_kind,
+            source_ref_id,
+            itemcard_id,
+            mar_sit_conta,
+            mar_cpat,
+            state,
+            inv_sit,
+            inv_con,
+            mar_npri,
+            mar_num,
+            mar_ccat,
+            mar_des,
+            mar_esp,
+            mar_est,
+            mar_uso,
+            mar_seg,
+            mar_col,
+            mar_mar,
+            mar_mod,
+            mar_tip,
+            mar_ser,
+            mar_med,
+            mar_npla,
+            mar_nmot,
+            mar_ncha,
+            mar_obs,
+            inv_num_1,
+            inv_num_2,
+            inv_num,
+            item_created_at,
+            item_updated_at,
+            hoj_num,
+            hoj_fec,
+            area_code,
+            area_description,
+            ambiente_code,
+            ambiente_description,
+            ambiente_piso,
+            ambiente_piso_des,
+            local_description,
+            local_code,
+            local_departamento,
+            usuario_code,
+            usuario,
+            fecha_margesi,
+            doc_margesi,
+            cuenta_margesi,
+            valor_margesi,
+            margesi_sbn,
+            margesi_area,
+            margesi_departamento,
+            margesi_local,
+            margesi_ambiente,
+            margesi_usuario,
+            margesi_description,
+            margesi_marca,
+            margesi_modelo,
+            margesi_tipo,
+            margesi_serie,
+            margesi_cod_local,
+            local_id,
+            margesi_obs,
+            local_libre,
+            ccosto_libre,
+            ambiente_libre,
+            usuario_libre,
+            campo_libre,
+            refreshed_at
+"""
+
+
+def build_reporte_aptot_locales_export_query(
+    tenant_id: UUID,
+    establishment_id: int,
+) -> tuple[str, tuple[Any, ...], str]:
+    """CSV APTOT filtrado por local desde ``reporte_aptot_cache``."""
+    tid = str(tenant_id)
+    sql = f"""
+        SELECT
+{_REPORTE_APTOT_CACHE_COLUMNS}
+        FROM reporte_aptot_cache
+        WHERE tenant_id = %s::uuid
+          AND (
+            local_id = %s
+            OR local_code = (
+                SELECT code FROM establishments
+                WHERE tenant_id = %s::uuid AND id = %s
+                LIMIT 1
+            )
+            OR margesi_cod_local = (
+                SELECT code FROM establishments
+                WHERE tenant_id = %s::uuid AND id = %s
+                LIMIT 1
+            )
+          )
+        ORDER BY source_kind, source_ref_id
+    """
+    params: tuple[Any, ...] = (
+        tid,
+        establishment_id,
+        tid,
+        establishment_id,
+        tid,
+        establishment_id,
+    )
+    return sql, params, "reporte_aptot_locales_export"
+
+
 def build_cards_export_query(tenant_id: UUID, q: RecordQuery) -> tuple[str, tuple[Any, ...], str]:
-    """SQL parametrizado para exportar hojas con los mismos filtros que el listado."""
     where = ["c.tenant_id = %s::uuid"]
     params: list[Any] = [str(tenant_id)]
 

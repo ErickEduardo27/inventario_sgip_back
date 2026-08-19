@@ -398,7 +398,7 @@ def _build_header_fields_table(
         [
             ("Departamento", dept_name),
             ("Sede", sede),
-            ("Piso", piso),
+            ("Piso/Zona", piso),
             ("Ambiente", ambiente),
             ("Digitador", digitador),
         ],

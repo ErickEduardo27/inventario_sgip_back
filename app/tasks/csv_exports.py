@@ -87,6 +87,84 @@ def export_reporte_aptot_csv_task(self, job_id: str, tenant_id: str) -> dict:
         return {"success": False, "job_id": job_id, "message": str(exc)}
 
 
+@celery_app.task(bind=True, name="export.reporte_aptot_locales_csv")
+def export_reporte_aptot_locales_csv_task(
+    self,
+    job_id: str,
+    tenant_id: str,
+    establishment_id: int,
+) -> dict:
+    job_uuid = UUID(job_id)
+    tenant_uuid = UUID(tenant_id)
+
+    try:
+        with SessionLocal() as db:
+            row = dl_svc.get_descarga_archivo(db, job_uuid, tenant_uuid)
+            if row is None:
+                return {"success": False, "message": "Trabajo de descarga no encontrado"}
+            dl_svc.mark_processing(db, row)
+            db.commit()
+            filename = row.filename or f"reporte_aptot_locales_{establishment_id}_{date.today().isoformat()}.csv"
+
+        self.update_state(state="PROGRESS", meta=_progress_meta(10, "Generando CSV…"))
+
+        from app.modules.inventory.export_queries import build_reporte_aptot_locales_export_query
+
+        inner_sql, params, _filename_base = build_reporte_aptot_locales_export_query(
+            tenant_uuid,
+            int(establishment_id),
+        )
+        payload = copy_query_to_csv_bytes(inner_sql, params)
+        content = b"\xef\xbb\xbf" + payload
+
+        self.update_state(
+            state="PROGRESS",
+            meta=_progress_meta(70, f"Subiendo a almacenamiento ({len(content) / 1024 / 1024:.1f} MB)…"),
+        )
+
+        gcs_path = upload_export_file(
+            module="reporte_aptot_locales",
+            tenant_id=tenant_uuid,
+            job_id=job_uuid,
+            filename=filename,
+            content=content,
+        )
+        download_url, expires_at = resolve_download_url(
+            storage_path=gcs_path,
+            filename=filename,
+            job_id=job_uuid,
+        )
+
+        with SessionLocal() as db:
+            row = dl_svc.get_descarga_archivo(db, job_uuid, tenant_uuid)
+            if row is None:
+                return {"success": False, "message": "Trabajo de descarga no encontrado"}
+            dl_svc.mark_success(
+                db,
+                row,
+                gcs_path=gcs_path,
+                download_url=download_url,
+                file_size_bytes=len(content),
+                expires_at=expires_at,
+            )
+            db.commit()
+
+        return {
+            "success": True,
+            "job_id": job_id,
+            "filename": filename,
+            "file_size_bytes": len(content),
+            "download_url": download_url,
+        }
+    except Exception as exc:  # noqa: BLE001
+        with SessionLocal() as db:
+            row = dl_svc.get_descarga_archivo(db, job_uuid, tenant_uuid)
+            if row is not None:
+                dl_svc.mark_failure(db, row, message=str(exc)[:500])
+                db.commit()
+        return {"success": False, "job_id": job_id, "message": str(exc)}
+
+
 @celery_app.task(bind=True, name="export.item_cards_csv")
 def export_item_cards_csv_task(
     self,

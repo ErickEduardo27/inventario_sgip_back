@@ -15,6 +15,7 @@ from app.core.export_storage import read_export_file
 from app.modules.iam.dependencies import require_permission
 from app.modules.iam.models import User
 from app.modules.inventory import conciliation as conc
+from app.modules.inventory import conciliation_import_report_pdf as conc_import_pdf
 from app.modules.inventory import cost_center_import as cc_import
 from app.modules.inventory import list_sbn_import as list_sbn_import_mod
 from app.modules.inventory import margesi_import as margesi_import_mod
@@ -27,6 +28,7 @@ from app.modules.inventory import descarga_archivos_service as dl_svc
 from app.modules.inventory import import_common as imp_common
 from app.modules.inventory import geo_catalog as geo
 from app.modules.inventory import models as inv_models
+from app.modules.inventory.attendance_router import router as attendance_router
 from app.modules.inventory import reporte_locales_cronograma_import as rl_cronograma_import
 from app.modules.inventory import reporte_locales_download_service as reporte_locales_dl
 from app.modules.inventory import reporte_locales_service as reporte_locales
@@ -46,6 +48,7 @@ from app.modules.inventory.schemas import (
     DescargaArchivoStatus,
     ConciliationPairWrite,
     ConciliationSbnWrite,
+    ConciliationImportReportRequest,
     CostCenterWrite,
     CostCenterImportResult,
     DesconciliarWrite,
@@ -97,6 +100,7 @@ from app.modules.inventory.schemas import (
 )
 
 router = APIRouter(prefix="/inventory", tags=["inventory"])
+router.include_router(attendance_router)
 
 
 def _csv_export_route(module: str, permission_code: str):
@@ -140,6 +144,7 @@ def _q(
         None,
         description="Export margesi: full=todas las columnas; report=layout operativo",
     ),
+    reporte: bool | None = Query(None, description="Filtrar ambientes: true=sí, false=no"),
 ) -> RecordQuery:
     return RecordQuery(
         page=page,
@@ -154,6 +159,7 @@ def _q(
         inv_sit_filter=inv_sit_filter,
         local_code=local_code,
         export_layout=export_layout,
+        reporte=reporte,
     )
 
 
@@ -302,7 +308,22 @@ def establishment_get(row_id: int, db: Session = Depends(get_db), tenant_id: UUI
     row = db.get(m.InvEstablishment, row_id)
     if not row or row.tenant_id != tenant_id:
         raise HTTPException(status_code=404, detail="No encontrado")
-    return inv.establishment_row_public_dict(row)
+    out = inv.establishment_row_public_dict(row)
+    inv._attach_establishment_geo_names(db, [out])
+    return out
+
+
+@router.delete("/establishments/{row_id}", response_model=OkPayload)
+def establishment_delete(
+    row_id: int,
+    db: Session = Depends(get_db),
+    tenant_id: UUID = Depends(get_tenant_id),
+    _: User = Depends(get_current_user),
+):
+    ok, msg = inv.delete_establishment(db, tenant_id, row_id)
+    if not ok:
+        raise HTTPException(status_code=400, detail=msg)
+    return OkPayload(success=True, message=msg)
 
 
 @router.post("/establishments", response_model=OkPayload)
@@ -958,6 +979,7 @@ def hoja_captura_bulk_pdf_fichas(
             hoj_num_from=body.hoj_num_from,
             hoj_num_to=body.hoj_num_to,
             establishment_id=body.establishment_id,
+            person_id=body.person_id,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1689,6 +1711,63 @@ def reporte_aptot_export_status(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
+@router.get("/reporte-aptot-locales/{establishment_id}/cache-meta")
+def reporte_aptot_locales_cache_meta(
+    establishment_id: int,
+    db: Session = Depends(get_db),
+    tenant_id: UUID = Depends(get_tenant_id),
+    _: User = Depends(require_permission("reporte_aptot_locales", "view")),
+):
+    try:
+        return inv.get_reporte_aptot_locales_cache_meta(db, tenant_id, establishment_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/reporte-aptot-locales/refresh", response_model=OkPayload)
+def reporte_aptot_locales_refresh(
+    tenant_id: UUID = Depends(get_tenant_id),
+    _: User = Depends(require_permission("reporte_aptot_locales", "edit")),
+):
+    from app.modules.inventory.reporte_aptot_cache import schedule_reporte_aptot_cache_refresh
+
+    schedule_reporte_aptot_cache_refresh(tenant_id)
+    return OkPayload(success=True, message="Actualización del cache APTOT encolada")
+
+
+@router.post("/reporte-aptot-locales/{establishment_id}/export", response_model=DescargaArchivoStartResponse)
+def reporte_aptot_locales_export_start(
+    establishment_id: int,
+    db: Session = Depends(get_db),
+    tenant_id: UUID = Depends(get_tenant_id),
+    user: User = Depends(require_permission("reporte_aptot_locales", "export")),
+):
+    try:
+        return DescargaArchivoStartResponse(
+            **dl_svc.schedule_reporte_aptot_locales_export(
+                db,
+                tenant_id=tenant_id,
+                establishment_id=establishment_id,
+                created_by_id=user.id,
+            )
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/reporte-aptot-locales/export/{job_id}", response_model=DescargaArchivoStatus)
+def reporte_aptot_locales_export_status(
+    job_id: UUID,
+    db: Session = Depends(get_db),
+    tenant_id: UUID = Depends(get_tenant_id),
+    _: User = Depends(require_permission("reporte_aptot_locales", "export")),
+):
+    try:
+        return DescargaArchivoStatus(**dl_svc.get_descarga_archivo_status(db, job_id, tenant_id))
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
 @router.get("/descarga-archivos/{job_id}/file")
 def descarga_archivo_file(
     job_id: UUID,
@@ -1705,6 +1784,7 @@ def descarga_archivo_file(
 
     module_perm: tuple[str, str] | None = {
         "reporte_aptot": ("reporte_aptot", "export"),
+        "reporte_aptot_locales": ("reporte_aptot_locales", "export"),
         "reporte_locales": ("reporte_locales", "view"),
         "item_cards": ("bienes", "export"),
     }.get(row.module)
@@ -1980,32 +2060,14 @@ def conciliation_import(
     tenant_id: UUID = Depends(get_tenant_id),
     _: User = Depends(get_current_user),
 ):
-    pairs: list[ImportConciliationRow] = []
-    for row in body.rows:
-        margesi_id, bien_id, reason = conc.match_import_conciliation(
-            db,
-            tenant_id,
-            row.codigo_interno,
-            row.inv_num,
-            row.mar_cpat,
-        )
-        if margesi_id and bien_id and not reason:
-            inv_con = (row.ord_conciliacion or "").strip() or "1"
-            pairs.append(
-                ImportConciliationRow(
-                    margesi_id=margesi_id,
-                    bien_id=bien_id,
-                    inv_con=inv_con,
-                )
-            )
-    if not pairs:
+    if not body.rows:
         return ImportConciliationResult(
             success=False,
-            message="No se encontraron pares válidos para conciliar",
+            message="No hay filas para procesar",
             registrados=[],
-            no_registrados=[r.model_dump() for r in body.rows],
+            no_registrados=[],
         )
-    result = conc.import_conciliar_rows(db, tenant_id, pairs)
+    result = conc.import_conciliation_match_rows(db, tenant_id, body.rows)
     return ImportConciliationResult(**result)
 
 
@@ -2016,7 +2078,17 @@ def conciliation_import_desconciliar(
     tenant_id: UUID = Depends(get_tenant_id),
     _: User = Depends(get_current_user),
 ):
-    result = conc.import_desconciliar_rows(db, tenant_id, body.item_ids)
+    if body.rows:
+        result = conc.import_desconciliar_match_rows(db, tenant_id, body.rows)
+    elif body.item_ids:
+        result = conc.import_desconciliar_rows(db, tenant_id, body.item_ids)
+    else:
+        return ImportConciliationResult(
+            success=False,
+            message="No hay filas para procesar",
+            registrados=[],
+            no_registrados=[],
+        )
     return ImportConciliationResult(**result)
 
 
@@ -2027,51 +2099,15 @@ def conciliation_sbn_import(
     tenant_id: UUID = Depends(get_tenant_id),
     _: User = Depends(get_current_user),
 ):
-    pairs: list[ImportConciliationRow] = []
-    for row in body.rows:
-        margesi_id, bien_id, reason = conc.match_import_conciliation_sbn(
-            db,
-            tenant_id,
-            row.codigo_interno,
-            row.inv_num,
-            row.mar_cpat,
-        )
-        if margesi_id and bien_id and not reason:
-            pairs.append(ImportConciliationRow(margesi_id=margesi_id, bien_id=bien_id))
-    if not pairs:
+    if not body.rows:
         return ImportConciliationResult(
             success=False,
-            message="No se encontraron pares válidos para conciliación SBN",
+            message="No hay filas para procesar",
             registrados=[],
-            no_registrados=[r.model_dump() for r in body.rows],
+            no_registrados=[],
         )
-    registrados: list[dict] = []
-    no_registrados: list[dict] = []
-    for pair in pairs:
-        marg = db.get(inv_models.InvMargesiItem, pair.margesi_id)
-        bien = db.get(inv_models.InvItemCard, pair.bien_id)
-        card = db.get(inv_models.InvCard, bien.id_card) if bien else None
-        codigo = "".join(c for c in str(marg.mar_cpat or "") if c.isdigit()) if marg else ""
-        ok, msg = conc.conciliar_pair_sbn(
-            db,
-            tenant_id,
-            pair.margesi_id,
-            pair.bien_id,
-            card.hoj_num if card else "",
-            codigo,
-        )
-        entry = {"margesi_id": pair.margesi_id, "bien_id": pair.bien_id, "message": msg}
-        if ok:
-            registrados.append(entry)
-        else:
-            no_registrados.append(entry)
-    success = len(registrados) > 0
-    return ImportConciliationResult(
-        success=success,
-        message="Importación SBN completada" if success else "No se pudo conciliar ningún registro",
-        registrados=registrados,
-        no_registrados=no_registrados,
-    )
+    result = conc.import_conciliation_sbn_match_rows(db, tenant_id, body.rows)
+    return ImportConciliationResult(**result)
 
 
 @router.post("/conciliation/no-conciliation/import", response_model=ImportConciliationResult)
@@ -2087,6 +2123,30 @@ def conciliation_no_conciliation_import(
     ]
     result = conc.import_no_conciliable_rows(db, tenant_id, rows)
     return ImportConciliationResult(**result)
+
+
+@router.post("/conciliation/import-report/pdf")
+def conciliation_import_report_pdf(
+    body: ConciliationImportReportRequest,
+    _: User = Depends(get_current_user),
+):
+    """Genera PDF con filas procesadas y errores de una importación masiva."""
+    try:
+        pdf_bytes, filename = conc_import_pdf.build_conciliation_import_report_pdf(
+            title=body.title,
+            message=body.message,
+            registrados=body.registrados,
+            no_registrados=body.no_registrados,
+            include_sbn_column=body.include_sbn_column,
+            include_ord_column=body.include_ord_column,
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"Error al generar PDF: {exc}") from exc
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 # --- Metadatos de columnas (como `columns()` en Laravel) ---

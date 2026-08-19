@@ -585,6 +585,9 @@ def conciliar_pair_sbn(
     bien_id: int,
     numero_hoja: str,
     codigo_sbn: str,
+    *,
+    inv_con: str = "1",
+    inv_hoj: str | None = None,
 ) -> tuple[bool, str]:
     codigo = "".join(c for c in str(codigo_sbn or "") if c.isdigit())
     if len(codigo) != 12:
@@ -614,13 +617,16 @@ def conciliar_pair_sbn(
 
         marg.inv_num = format_inv_num(bien.inv_num)
         marg.inv_sit = "C"
-        marg.inv_con = "1"
-        marg.inv_hoj = numero_hoja.strip() or None
+        marg.inv_con = inv_con
+        if inv_hoj is not None:
+            marg.inv_hoj = inv_hoj.strip() or None
+        else:
+            marg.inv_hoj = numero_hoja.strip() or None
 
         bien.mar_num = mar_num
         bien.mar_cpat = codigo
         bien.inv_sit = "C"
-        bien.inv_con = "1"
+        bien.inv_con = inv_con
         bien.id_margesi = marg.id
         bien.extra = extra or None
 
@@ -986,15 +992,194 @@ def match_import_conciliation_sbn(
     mar_cpat: str | None,
 ) -> tuple[int | None, int | None, str | None]:
     margesi_id, bien_id, reason = match_import_conciliation(
-        db, tenant_id, codigo_interno, inv_num, mar_cpat
+        db, tenant_id, codigo_interno, inv_num, None
     )
     if not margesi_id or not bien_id:
-        return margesi_id, bien_id, reason
+        return margesi_id, bien_id, reason or "No se encontraron el margesi o el bien"
+    codigo = "".join(c for c in str(mar_cpat or "") if c.isdigit())
+    if len(codigo) != 12:
+        return margesi_id, bien_id, "El código SBN debe tener exactamente 12 dígitos numéricos"
     marg = db.get(m.InvMargesiItem, margesi_id)
     bien = db.get(m.InvItemCard, bien_id)
     if marg and bien and _sbn_prefix(bien.mar_cpat) != _sbn_prefix(marg.mar_cpat):
-        return margesi_id, bien_id, "Prefijo SBN (8 dígitos) no coincide"
-    codigo = "".join(c for c in str(marg.mar_cpat or "") if c.isdigit()) if marg else ""
-    if len(codigo) != 12:
-        return margesi_id, bien_id, "Código SBN del Margesi debe tener 12 dígitos"
+        return margesi_id, bien_id, "Los primeros 8 dígitos del SBN del bien y del Margesi no coinciden"
     return margesi_id, bien_id, None
+
+
+def _import_row_entry(row: dict[str, Any], **extra: Any) -> dict[str, Any]:
+    return {**row, **extra}
+
+
+def import_conciliation_match_rows(
+    db: Session,
+    tenant_id: UUID,
+    rows: list[Any],
+) -> dict[str, Any]:
+    registrados: list[dict[str, Any]] = []
+    no_registrados: list[dict[str, Any]] = []
+    for row in rows:
+        row_dump = row.model_dump() if hasattr(row, "model_dump") else dict(row)
+        margesi_id, bien_id, reason = match_import_conciliation(
+            db,
+            tenant_id,
+            row_dump.get("codigo_interno"),
+            row_dump.get("inv_num"),
+            row_dump.get("mar_cpat"),
+        )
+        if not margesi_id or not bien_id or reason:
+            no_registrados.append(
+                _import_row_entry(
+                    row_dump,
+                    message=reason or "No se encontraron el margesi o el bien",
+                )
+            )
+            continue
+        bien = db.get(m.InvItemCard, bien_id)
+        inv_con = str(row_dump.get("ord_conciliacion") or "").strip() or "1"
+        inv_hoj = format_inv_num(bien.inv_num) if bien and bien.inv_num is not None else "1"
+        ok, msg = conciliar_pair(
+            db,
+            tenant_id,
+            margesi_id,
+            bien_id,
+            inv_con=inv_con,
+            inv_hoj=inv_hoj,
+        )
+        entry = _import_row_entry(row_dump, margesi_id=margesi_id, bien_id=bien_id, message=msg)
+        if ok:
+            registrados.append(entry)
+        else:
+            no_registrados.append(entry)
+    success = len(registrados) > 0
+    return {
+        "success": success,
+        "message": "Importación completada" if success else "No se pudo conciliar ningún registro",
+        "registrados": registrados,
+        "no_registrados": no_registrados,
+    }
+
+
+def import_conciliation_sbn_match_rows(
+    db: Session,
+    tenant_id: UUID,
+    rows: list[Any],
+) -> dict[str, Any]:
+    registrados: list[dict[str, Any]] = []
+    no_registrados: list[dict[str, Any]] = []
+    for row in rows:
+        row_dump = row.model_dump() if hasattr(row, "model_dump") else dict(row)
+        margesi_id, bien_id, reason = match_import_conciliation_sbn(
+            db,
+            tenant_id,
+            row_dump.get("codigo_interno"),
+            row_dump.get("inv_num"),
+            row_dump.get("mar_cpat"),
+        )
+        if not margesi_id or not bien_id or reason:
+            no_registrados.append(
+                _import_row_entry(
+                    row_dump,
+                    message=reason or "No se encontraron el margesi o el bien",
+                )
+            )
+            continue
+        bien = db.get(m.InvItemCard, bien_id)
+        codigo = "".join(c for c in str(row_dump.get("mar_cpat") or "") if c.isdigit())
+        inv_con = str(row_dump.get("ord_conciliacion") or "").strip() or "1"
+        inv_hoj = format_inv_num(bien.inv_num) if bien and bien.inv_num is not None else None
+        ok, msg = conciliar_pair_sbn(
+            db,
+            tenant_id,
+            margesi_id,
+            bien_id,
+            "",
+            codigo,
+            inv_con=inv_con,
+            inv_hoj=inv_hoj,
+        )
+        entry = _import_row_entry(row_dump, margesi_id=margesi_id, bien_id=bien_id, message=msg)
+        if ok:
+            registrados.append(entry)
+        else:
+            no_registrados.append(entry)
+    success = len(registrados) > 0
+    return {
+        "success": success,
+        "message": "Importación SBN completada" if success else "No se pudo conciliar ningún registro",
+        "registrados": registrados,
+        "no_registrados": no_registrados,
+    }
+
+
+def import_desconciliar_match_rows(
+    db: Session,
+    tenant_id: UUID,
+    rows: list[Any],
+) -> dict[str, Any]:
+    registrados: list[dict[str, Any]] = []
+    no_registrados: list[dict[str, Any]] = []
+    for row in rows:
+        row_dump = row.model_dump() if hasattr(row, "model_dump") else dict(row)
+        codigo_interno = str(row_dump.get("codigo_interno") or "").strip()
+        inv_num_raw = str(row_dump.get("inv_num") or "").strip()
+        if not codigo_interno or not inv_num_raw:
+            no_registrados.append(
+                _import_row_entry(row_dump, message="Fila incompleta: requiere código interno e inv_num")
+            )
+            continue
+
+        marg = db.scalar(
+            select(m.InvMargesiItem).where(
+                m.InvMargesiItem.tenant_id == tenant_id,
+                m.InvMargesiItem.mar_num == codigo_interno,
+                m.InvMargesiItem.inv_sit == "C",
+            )
+        )
+        inv_n = try_parse_inventory_number(inv_num_raw)
+        bien = None
+        if inv_n is not None:
+            bien = db.scalar(
+                select(m.InvItemCard).where(
+                    m.InvItemCard.tenant_id == tenant_id,
+                    m.InvItemCard.inv_num == inv_n,
+                    m.InvItemCard.id_margesi.isnot(None),
+                    m.InvItemCard.inv_sit == "C",
+                )
+            )
+
+        if not marg or not bien:
+            no_registrados.append(
+                _import_row_entry(
+                    row_dump,
+                    message="No se encontraron el margesi o el bien conciliados",
+                )
+            )
+            continue
+        if int(bien.id_margesi) != int(marg.id):
+            no_registrados.append(
+                _import_row_entry(
+                    row_dump,
+                    message="El bien no corresponde al Margesi indicado",
+                )
+            )
+            continue
+
+        ok, msg = desconciliar_pair_sbn(db, tenant_id, int(bien.id), int(marg.id))
+        entry = _import_row_entry(
+            row_dump,
+            margesi_id=int(marg.id),
+            bien_id=int(bien.id),
+            message=msg,
+        )
+        if ok:
+            registrados.append(entry)
+        else:
+            no_registrados.append(entry)
+
+    success = len(registrados) > 0
+    return {
+        "success": success,
+        "message": "Desconciliación completada" if success else "No se pudo desconciliar ningún registro",
+        "registrados": registrados,
+        "no_registrados": no_registrados,
+    }

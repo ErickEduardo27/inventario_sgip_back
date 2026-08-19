@@ -118,6 +118,7 @@ class EnvironmentWrite(BaseModel):
     code: str = ""
     image: str | None = None
     user_create: str | None = None
+    reporte: bool = False
 
 
 class CardWrite(BaseModel):
@@ -255,6 +256,10 @@ class RecordQuery(BaseModel):
     export_layout: Literal["full", "report"] | None = Field(
         default=None,
         description="Export margesi: full=todas las columnas; report=layout operativo",
+    )
+    reporte: bool | None = Field(
+        default=None,
+        description="Filtrar ambientes por campo reporte (true=sí, false=no)",
     )
 
 
@@ -420,6 +425,10 @@ class ActaCierrePdfRequest(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     hora: str | None = None
+    fecha: str | None = Field(
+        default=None,
+        description="Fecha del acta (YYYY-MM-DD). Si no se envía, se usa fecha inventario real del seguimiento.",
+    )
     representantes_banco: str | None = None
     representante_sertec: str | None = None
     bn_nombre: str | None = None
@@ -432,6 +441,7 @@ class ActaCierrePdfRequest(BaseModel):
 
     @field_validator(
         "hora",
+        "fecha",
         "representantes_banco",
         "representante_sertec",
         "bn_nombre",
@@ -547,8 +557,14 @@ class ImportNoConciliableMatchRequest(BaseModel):
     rows: list[ImportNoConciliableMatchRow]
 
 
+class ImportDesconciliarMatchRow(BaseModel):
+    codigo_interno: str | None = None
+    inv_num: str | None = None
+
+
 class ImportDesconciliarRequest(BaseModel):
-    item_ids: list[int]
+    item_ids: list[int] = Field(default_factory=list)
+    rows: list[ImportDesconciliarMatchRow] = Field(default_factory=list)
 
 
 class ImportConciliationResult(BaseModel):
@@ -556,6 +572,15 @@ class ImportConciliationResult(BaseModel):
     message: str
     registrados: list[dict[str, Any]]
     no_registrados: list[dict[str, Any]]
+
+
+class ConciliationImportReportRequest(BaseModel):
+    title: str = "Reporte de importación"
+    message: str = ""
+    registrados: list[dict[str, Any]] = Field(default_factory=list)
+    no_registrados: list[dict[str, Any]] = Field(default_factory=list)
+    include_sbn_column: bool = True
+    include_ord_column: bool = True
 
 
 class EstablishmentImportResult(BaseModel):
@@ -640,10 +665,11 @@ class MargesiImportResult(BaseModel):
 class HojaCapturaBulkPdfRequest(BaseModel):
     """Solicitud de PDF único con varias fichas de hoja de captura."""
 
-    mode: Literal["range", "local"]
+    mode: Literal["range", "local", "usuario"]
     hoj_num_from: int | None = Field(default=None, ge=0)
     hoj_num_to: int | None = Field(default=None, ge=0)
     establishment_id: int | None = Field(default=None, ge=1)
+    person_id: int | None = Field(default=None, ge=1, description="Usuario responsable del bien (persons.id)")
 
 
 class HojaCapturaImportResult(BaseModel):

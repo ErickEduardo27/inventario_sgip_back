@@ -6,8 +6,8 @@ from sqlalchemy.orm import Session
 
 from app.core.exceptions import AppError
 from app.core.jwt import encode_access_token
-from app.core.security import verify_password
-from app.modules.auth.schemas import LoginRequest, LoginResponse
+from app.core.security import hash_password, verify_password
+from app.modules.auth.schemas import LoginRequest, LoginResponse, ProfileUpdate
 from app.modules.iam.models import User
 from app.modules.iam.schemas import UserOut
 from app.shared.utils.strings import normalize_email
@@ -42,3 +42,23 @@ class AuthService:
             expires_in=expires_in,
             user=UserOut.model_validate(user),
         )
+
+    def update_own_profile(self, user: User, body: ProfileUpdate) -> User:
+        if not body.model_fields_set:
+            raise AppError("No hay cambios para guardar", 400)
+
+        if body.full_name is not None:
+            user.full_name = body.full_name.strip()
+
+        if body.new_password:
+            if not verify_password(body.current_password or "", user.password_hash):
+                raise AppError("La contraseña actual no es correcta", 400)
+            user.password_hash = hash_password(body.new_password)
+
+        try:
+            self.db.commit()
+            self.db.refresh(user)
+        except Exception as e:
+            self.db.rollback()
+            raise AppError("No se pudo actualizar el perfil", 400) from e
+        return user

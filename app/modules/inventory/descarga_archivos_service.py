@@ -155,6 +155,49 @@ def schedule_reporte_aptot_export(
     }
 
 
+def schedule_reporte_aptot_locales_export(
+    db: Session,
+    *,
+    tenant_id: UUID,
+    establishment_id: int,
+    created_by_id: UUID | None = None,
+) -> dict[str, Any]:
+    from app.modules.inventory import models as m
+    from app.tasks.csv_exports import export_reporte_aptot_locales_csv_task
+
+    est = db.get(m.InvEstablishment, establishment_id)
+    if not est or est.tenant_id != tenant_id:
+        raise ValueError("Local no encontrado")
+
+    job_id = uuid.uuid4()
+    code = str(est.code or establishment_id).strip() or str(establishment_id)
+    filename = f"reporte_aptot_{code}_{date.today().isoformat()}.csv"
+    row = create_descarga_archivo(
+        db,
+        job_id=job_id,
+        tenant_id=tenant_id,
+        module="reporte_aptot_locales",
+        filename=filename,
+        created_by_id=created_by_id,
+    )
+    db.commit()
+
+    task = export_reporte_aptot_locales_csv_task.delay(
+        str(job_id),
+        str(tenant_id),
+        int(establishment_id),
+    )
+    set_celery_task_id(db, row, task.id)
+    db.commit()
+
+    return {
+        "success": True,
+        "async_job": True,
+        "job_id": str(job_id),
+        "message": "Exportación APTOT del local encolada. Consulte el estado para obtener el enlace de descarga.",
+    }
+
+
 def schedule_item_cards_export(
     db: Session,
     *,

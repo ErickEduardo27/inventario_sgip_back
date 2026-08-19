@@ -50,6 +50,7 @@ INVENTORY_UI_COMPONENT_CODES: frozenset[str] = frozenset(
         "bienes",
         "imagenes",
         "reporte_aptot",
+        "reporte_aptot_locales",
         "reporte_locales",
         "conciliacion",
         "conciliacion_sbn",
@@ -60,6 +61,8 @@ INVENTORY_UI_COMPONENT_CODES: frozenset[str] = frozenset(
         "perfiles",
         "settings",
         "auditoria",
+        "asistencia",
+        "panel_asistencia",
     }
 )
 

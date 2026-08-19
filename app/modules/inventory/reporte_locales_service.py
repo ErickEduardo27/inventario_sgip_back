@@ -312,7 +312,8 @@ def build_acta_cierre_pdf(
     conforme = int(stats.get("margesi_conciliado") or 0)
     sobrantes = int(stats.get("inventario_sobrante") or 0)
 
-    fecha = rep.fecha_inventario_real if rep and rep.fecha_inventario_real else None
+    fecha = body.fecha or (rep.fecha_inventario_real if rep and rep.fecha_inventario_real else None)
+    grupo = str(rep.grupo or "").strip() if rep else ""
 
     nota_sistema = str(rep.nota or "").strip() if rep else ""
     obs_adicionales = str(body.observaciones or "").strip()
@@ -324,10 +325,10 @@ def build_acta_cierre_pdf(
     payload: dict[str, Any] = {
         "establishment_code": est.code,
         "establishment_description": est.description,
-        "sede_grupo": (rep.grupo if rep else None) or "",
+        "sede_grupo": grupo,
         "fecha": fecha,
         "hora": body.hora,
-        "macroregion": dept_name,
+        "macroregion": grupo,
         "departamento": dept_name,
         "provincia": prov_name,
         "distrito": dist_name,

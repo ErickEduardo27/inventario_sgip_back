@@ -62,6 +62,7 @@ class InvEstablishment(Base, TenantMixin, TimestampMixin):
     aditional_information: Mapped[str | None] = mapped_column(Text, nullable=True)
     latitude: Mapped[float | None] = mapped_column(Float, nullable=True)
     longitude: Mapped[float | None] = mapped_column(Float, nullable=True)
+    geofence_radius_m: Mapped[int] = mapped_column(Integer, nullable=False, default=100)
     photo_mime: Mapped[str | None] = mapped_column(String(100), nullable=True)
     photo_blob: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
     photo_token: Mapped[uuid.UUID | None] = mapped_column(
@@ -141,6 +142,7 @@ class InvEnvironment(Base, TenantMixin, TimestampMixin):
     code: Mapped[str] = mapped_column(String(100), nullable=False, default="", index=True)
     image: Mapped[str | None] = mapped_column(String(500), nullable=True)
     user_create: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    reporte: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
     establishment: Mapped["InvEstablishment"] = relationship(back_populates="ambientes")
     cards: Mapped[list["InvCard"]] = relationship(back_populates="ambiente")

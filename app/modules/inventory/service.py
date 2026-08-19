@@ -144,6 +144,36 @@ def establishment_row_public_dict(row: m.InvEstablishment) -> dict[str, Any]:
     return d
 
 
+def _attach_establishment_geo_names(db: Session, items: list[dict[str, Any]]) -> None:
+    """Agrega department_name, province_name y district_name desde catálogos geo."""
+    if not items:
+        return
+    from app.modules.inventory.geo_models import InvDepartment, InvDistrict, InvProvince
+
+    dept_ids = {x["department_id"] for x in items if x.get("department_id")}
+    prov_ids = {x["province_id"] for x in items if x.get("province_id")}
+    dist_ids = {x["district_id"] for x in items if x.get("district_id")}
+    dept_map: dict[str, str] = {}
+    prov_map: dict[str, str] = {}
+    dist_map: dict[str, str] = {}
+    if dept_ids:
+        for row in db.scalars(select(InvDepartment).where(InvDepartment.id.in_(dept_ids))):
+            dept_map[row.id] = row.description
+    if prov_ids:
+        for row in db.scalars(select(InvProvince).where(InvProvince.id.in_(prov_ids))):
+            prov_map[row.id] = row.description
+    if dist_ids:
+        for row in db.scalars(select(InvDistrict).where(InvDistrict.id.in_(dist_ids))):
+            dist_map[row.id] = row.description
+    for x in items:
+        did = x.get("department_id")
+        pid = x.get("province_id")
+        dist_id = x.get("district_id")
+        x["department_name"] = dept_map.get(did) if did else None
+        x["province_name"] = prov_map.get(pid) if pid else None
+        x["district_name"] = dist_map.get(dist_id) if dist_id else None
+
+
 def _apply_establishment_photo(row: m.InvEstablishment, body: EstablishmentWrite) -> None:
     if body.photo_clear:
         row.photo_blob = None
@@ -269,7 +299,30 @@ def list_establishments(db: Session, tenant_id: UUID, q: RecordQuery, allowed_co
         order_col = "id"
     stmt = stmt.order_by(_ord_clause(m.InvEstablishment, order_col, q.ord_tipo))
     rows, total = _paged(db, stmt, q.page, q.per_page)
-    return [establishment_row_public_dict(r) for r in rows], total
+    out = [establishment_row_public_dict(r) for r in rows]
+    _attach_establishment_geo_names(db, out)
+    return out, total
+
+
+def delete_establishment(db: Session, tenant_id: UUID, est_id: int) -> tuple[bool, str]:
+    row = db.get(m.InvEstablishment, est_id)
+    if not row or row.tenant_id != tenant_id:
+        return False, "Local no encontrado"
+    env_subq = select(m.InvEnvironment.id).where(
+        m.InvEnvironment.tenant_id == tenant_id,
+        m.InvEnvironment.establishment_id == est_id,
+    )
+    card = db.scalar(
+        select(m.InvCard).where(
+            m.InvCard.tenant_id == tenant_id,
+            m.InvCard.id_ambiente.in_(env_subq),
+        )
+    )
+    if card:
+        return False, "No se puede eliminar porque tiene hojas de captura asociadas (vía ambientes)."
+    db.delete(row)
+    db.commit()
+    return True, "Local eliminado con éxito"
 
 
 # --- Personas ---
@@ -562,6 +615,8 @@ def list_environments(
     stmt = select(m.InvEnvironment).where(m.InvEnvironment.tenant_id == tenant_id)
     if q.establishment_id is not None:
         stmt = stmt.where(m.InvEnvironment.establishment_id == q.establishment_id)
+    if q.reporte is not None:
+        stmt = stmt.where(m.InvEnvironment.reporte.is_(q.reporte))
 
     pattern = _search_like(q)
     if pattern is not None:
@@ -595,7 +650,52 @@ def list_environments(
 
     stmt = stmt.order_by(_ord_clause(m.InvEnvironment, order_col, q.ord_tipo))
     rows, total = _paged(db, stmt, q.page, q.per_page)
-    return [row_to_dict(r) for r in rows], total
+    if not rows:
+        return [], total
+    reporte_env_ids = [int(r.id) for r in rows if r.reporte]
+    reporte_env_codes = [str(r.code or "").strip() for r in rows if r.reporte and str(r.code or "").strip()]
+    bienes_counts: dict[int, int] = {}
+    margesi_counts: dict[str, int] = {}
+    if reporte_env_ids:
+        count_rows = db.execute(
+            select(m.InvCard.id_ambiente, func.count(m.InvItemCard.id))
+            .join(
+                m.InvItemCard,
+                (m.InvItemCard.id_card == m.InvCard.id) & (m.InvItemCard.tenant_id == m.InvCard.tenant_id),
+            )
+            .where(
+                m.InvCard.tenant_id == tenant_id,
+                m.InvCard.id_ambiente.in_(reporte_env_ids),
+            )
+            .group_by(m.InvCard.id_ambiente)
+        ).all()
+        for amb_id, cnt in count_rows:
+            bienes_counts[int(amb_id)] = int(cnt or 0)
+    if reporte_env_codes:
+        margesi_rows = db.execute(
+            select(m.InvMargesiItem.amb_cod, func.count(m.InvMargesiItem.id))
+            .where(
+                m.InvMargesiItem.tenant_id == tenant_id,
+                m.InvMargesiItem.amb_cod.in_(reporte_env_codes),
+            )
+            .group_by(m.InvMargesiItem.amb_cod)
+        ).all()
+        for amb_cod, cnt in margesi_rows:
+            code = str(amb_cod or "").strip()
+            if code:
+                margesi_counts[code] = int(cnt or 0)
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        d = row_to_dict(r)
+        env_code = str(r.code or "").strip()
+        if r.reporte:
+            d["bienes_count"] = bienes_counts.get(int(r.id), 0)
+            d["margesi_count"] = margesi_counts.get(env_code, 0)
+        else:
+            d["bienes_count"] = None
+            d["margesi_count"] = None
+        out.append(d)
+    return out, total
 
 
 # --- Cards (CardsController / HojaCapturaController) ---
@@ -1049,6 +1149,7 @@ def _card_ids_for_bulk_ficha_pdf(
     hoj_num_from: int | None,
     hoj_num_to: int | None,
     establishment_id: int | None,
+    person_id: int | None,
 ) -> list[int]:
     if mode == "range":
         if hoj_num_from is None or hoj_num_to is None:
@@ -1080,6 +1181,17 @@ def _card_ids_for_bulk_ficha_pdf(
             )
             .order_by(m.InvCard.hoj_num.asc())
         )
+    elif mode == "usuario":
+        if not person_id:
+            raise ValueError("Seleccione el usuario responsable del bien")
+        stmt = (
+            select(m.InvCard.id)
+            .where(
+                m.InvCard.tenant_id == tenant_id,
+                m.InvCard.id_usuario == person_id,
+            )
+            .order_by(m.InvCard.hoj_num.asc())
+        )
     else:
         raise ValueError("Modo de descarga no válido")
 
@@ -1094,6 +1206,7 @@ def build_hoja_captura_bulk_ficha_pdf(
     hoj_num_from: int | None = None,
     hoj_num_to: int | None = None,
     establishment_id: int | None = None,
+    person_id: int | None = None,
 ) -> tuple[bytes, str]:
     from app.modules.inventory.hoja_captura_pdf import generate_ficha_pdf, merge_pdf_documents
 
@@ -1104,12 +1217,13 @@ def build_hoja_captura_bulk_ficha_pdf(
         hoj_num_from=hoj_num_from,
         hoj_num_to=hoj_num_to,
         establishment_id=establishment_id,
+        person_id=person_id,
     )
     if not card_ids:
         raise ValueError("No se encontraron hojas para los criterios indicados")
     if len(card_ids) > MAX_HOJA_CAPTURA_BULK_PDF:
         raise ValueError(
-            f"Máximo {MAX_HOJA_CAPTURA_BULK_PDF} hojas por descarga. Acorte el rango o filtre por local."
+            f"Máximo {MAX_HOJA_CAPTURA_BULK_PDF} hojas por descarga. Acorte el criterio de búsqueda."
         )
 
     parts: list[bytes] = []
@@ -1121,6 +1235,10 @@ def build_hoja_captura_bulk_ficha_pdf(
 
     if mode == "range":
         filename = f"fichas_hojas_{hoj_num_from}-{hoj_num_to}.pdf"
+    elif mode == "usuario":
+        person = db.get(m.InvPerson, person_id)
+        label = (person.number if person else None) or str(person_id)
+        filename = f"fichas_usuario_{label}.pdf"
     else:
         est = db.scalar(
             select(m.InvEstablishment.code).where(
@@ -2494,4 +2612,44 @@ def get_reporte_aptot_cache_meta(db: Session, tenant_id: UUID) -> dict[str, Any]
         "row_count": int(row.row_count or 0),
         "refreshed_at": row.refreshed_at.isoformat() if row.refreshed_at else None,
         "message": row.message or "",
+    }
+
+
+def _reporte_aptot_cache_local_clause(establishment_id: int, est_code: str):
+    from sqlalchemy import or_
+
+    code = (est_code or "").strip()
+    clauses = [m.InvReporteAptotCache.local_id == establishment_id]
+    if code:
+        clauses.append(m.InvReporteAptotCache.local_code == code)
+        clauses.append(m.InvReporteAptotCache.margesi_cod_local == code)
+    return or_(*clauses)
+
+
+def get_reporte_aptot_locales_cache_meta(
+    db: Session,
+    tenant_id: UUID,
+    establishment_id: int,
+) -> dict[str, Any]:
+    from sqlalchemy import func, select
+
+    est = db.get(m.InvEstablishment, establishment_id)
+    if not est or est.tenant_id != tenant_id:
+        raise ValueError("Local no encontrado")
+
+    global_meta = get_reporte_aptot_cache_meta(db, tenant_id)
+    local_count = db.scalar(
+        select(func.count())
+        .select_from(m.InvReporteAptotCache)
+        .where(
+            m.InvReporteAptotCache.tenant_id == tenant_id,
+            _reporte_aptot_cache_local_clause(establishment_id, str(est.code or "")),
+        )
+    )
+    return {
+        **global_meta,
+        "establishment_id": int(est.id),
+        "establishment_code": str(est.code or ""),
+        "establishment_description": est.description,
+        "local_row_count": int(local_count or 0),
     }
