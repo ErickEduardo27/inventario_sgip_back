@@ -343,7 +343,7 @@ SELECT
     'faltante'::varchar AS source_kind,
     m.id AS source_ref_id,
     NOW() AT TIME ZONE 'UTC' AS refreshed_at,
-    NULL::uuid AS itemcard_id,
+    NULL AS itemcard_id,
     NULL AS mar_sit_conta,
     NULL AS mar_cpat,
     CASE
@@ -404,7 +404,7 @@ SELECT
     m.mar_tip AS margesi_tipo,
     m.mar_ser AS margesi_serie,
     est.code AS margesi_cod_local,
-    NULL::integer AS local_id,
+    NULL AS local_id,
     m.mar_obs AS margesi_obs,
     m.local_libre,
     m.ccosto_libre,
