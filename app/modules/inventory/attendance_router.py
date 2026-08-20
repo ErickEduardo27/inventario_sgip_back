@@ -13,7 +13,6 @@ from app.modules.iam.dependencies import require_permission
 from app.modules.iam.models import User
 from app.modules.inventory import attendance_service as att
 from app.modules.inventory.attendance_schemas import (
-    AttendanceAssignmentsWrite,
     AttendanceGeofencePreview,
     AttendanceLocationSampleWrite,
     AttendanceMarkWrite,
@@ -164,29 +163,3 @@ def attendance_panel_session_detail(
         return att.get_panel_session_detail(db, tenant_id, session_id)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-
-
-@router.get("/panel/users/{user_id}/assignments")
-def attendance_panel_user_assignments(
-    user_id: UUID,
-    db: Session = Depends(get_db),
-    tenant_id: UUID = Depends(get_tenant_id),
-    _: User = Depends(require_permission("panel_asistencia", "view")),
-):
-    return {"establishment_ids": att.list_user_assignments(db, tenant_id, user_id)}
-
-
-@router.put("/panel/users/{user_id}/assignments")
-def attendance_panel_set_assignments(
-    user_id: UUID,
-    body: AttendanceAssignmentsWrite,
-    db: Session = Depends(get_db),
-    tenant_id: UUID = Depends(get_tenant_id),
-    _: User = Depends(require_permission("panel_asistencia", "edit")),
-):
-    if body.user_id != user_id:
-        raise HTTPException(status_code=400, detail="user_id inconsistente")
-    try:
-        return att.set_user_assignments(db, tenant_id, user_id, body.establishment_ids)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc

@@ -171,7 +171,7 @@ def schedule_reporte_aptot_locales_export(
 
     job_id = uuid.uuid4()
     code = str(est.code or establishment_id).strip() or str(establishment_id)
-    filename = f"reporte_aptot_{code}_{date.today().isoformat()}.csv"
+    filename = f"reporte_aptot_locales_{establishment_id}_{code}_{date.today().isoformat()}.csv"
     row = create_descarga_archivo(
         db,
         job_id=job_id,
@@ -194,7 +194,7 @@ def schedule_reporte_aptot_locales_export(
         "success": True,
         "async_job": True,
         "job_id": str(job_id),
-        "message": "Exportación APTOT del local encolada. Consulte el estado para obtener el enlace de descarga.",
+        "message": "Generación del reporte APTOT del local encolada. Podrá descargarlo cuando finalice.",
     }
 
 

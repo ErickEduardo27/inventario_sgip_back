@@ -450,29 +450,24 @@ def build_reporte_aptot_locales_export_query(
     tenant_id: UUID,
     establishment_id: int,
 ) -> tuple[str, tuple[Any, ...], str]:
-    """CSV APTOT filtrado por local desde ``reporte_aptot_cache``."""
+    """CSV APTOT filtrado por local, generado en vivo (sin cache global)."""
+    from app.modules.inventory.reporte_aptot_sql import REPORTE_APTOT_LOCALES_LIVE_UNION_SQL
+
     tid = str(tenant_id)
     sql = f"""
         SELECT
 {_REPORTE_APTOT_CACHE_COLUMNS}
-        FROM reporte_aptot_cache
-        WHERE tenant_id = %s::uuid
-          AND (
-            local_id = %s
-            OR local_code = (
-                SELECT code FROM establishments
-                WHERE tenant_id = %s::uuid AND id = %s
-                LIMIT 1
-            )
-            OR margesi_cod_local = (
-                SELECT code FROM establishments
-                WHERE tenant_id = %s::uuid AND id = %s
-                LIMIT 1
-            )
-          )
+        FROM (
+{REPORTE_APTOT_LOCALES_LIVE_UNION_SQL}
+        ) aptot
         ORDER BY source_kind, source_ref_id
     """
     params: tuple[Any, ...] = (
+        tid,
+        establishment_id,
+        establishment_id,
+        tid,
+        establishment_id,
         tid,
         establishment_id,
         tid,

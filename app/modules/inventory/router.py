@@ -1711,6 +1711,19 @@ def reporte_aptot_export_status(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
+@router.get("/reporte-aptot-locales/{establishment_id}/export-meta")
+def reporte_aptot_locales_export_meta(
+    establishment_id: int,
+    db: Session = Depends(get_db),
+    tenant_id: UUID = Depends(get_tenant_id),
+    _: User = Depends(require_permission("reporte_aptot_locales", "view")),
+):
+    try:
+        return inv.get_reporte_aptot_locales_export_meta(db, tenant_id, establishment_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
 @router.get("/reporte-aptot-locales/{establishment_id}/cache-meta")
 def reporte_aptot_locales_cache_meta(
     establishment_id: int,
@@ -1718,21 +1731,11 @@ def reporte_aptot_locales_cache_meta(
     tenant_id: UUID = Depends(get_tenant_id),
     _: User = Depends(require_permission("reporte_aptot_locales", "view")),
 ):
+    """Retrocompatible; delega en ``export-meta``."""
     try:
-        return inv.get_reporte_aptot_locales_cache_meta(db, tenant_id, establishment_id)
+        return inv.get_reporte_aptot_locales_export_meta(db, tenant_id, establishment_id)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-
-
-@router.post("/reporte-aptot-locales/refresh", response_model=OkPayload)
-def reporte_aptot_locales_refresh(
-    tenant_id: UUID = Depends(get_tenant_id),
-    _: User = Depends(require_permission("reporte_aptot_locales", "edit")),
-):
-    from app.modules.inventory.reporte_aptot_cache import schedule_reporte_aptot_cache_refresh
-
-    schedule_reporte_aptot_cache_refresh(tenant_id)
-    return OkPayload(success=True, message="Actualización del cache APTOT encolada")
 
 
 @router.post("/reporte-aptot-locales/{establishment_id}/export", response_model=DescargaArchivoStartResponse)

@@ -2626,30 +2626,65 @@ def _reporte_aptot_cache_local_clause(establishment_id: int, est_code: str):
     return or_(*clauses)
 
 
-def get_reporte_aptot_locales_cache_meta(
+def get_reporte_aptot_locales_export_meta(
     db: Session,
     tenant_id: UUID,
     establishment_id: int,
 ) -> dict[str, Any]:
-    from sqlalchemy import func, select
+    from sqlalchemy import select
 
     est = db.get(m.InvEstablishment, establishment_id)
     if not est or est.tenant_id != tenant_id:
         raise ValueError("Local no encontrado")
 
-    global_meta = get_reporte_aptot_cache_meta(db, tenant_id)
-    local_count = db.scalar(
-        select(func.count())
-        .select_from(m.InvReporteAptotCache)
+    prefix = f"reporte_aptot_locales_{establishment_id}_"
+    job = db.scalar(
+        select(m.InvDescargaArchivo)
         .where(
-            m.InvReporteAptotCache.tenant_id == tenant_id,
-            _reporte_aptot_cache_local_clause(establishment_id, str(est.code or "")),
+            m.InvDescargaArchivo.tenant_id == tenant_id,
+            m.InvDescargaArchivo.module == "reporte_aptot_locales",
+            m.InvDescargaArchivo.filename.like(f"{prefix}%"),
         )
+        .order_by(m.InvDescargaArchivo.created_at.desc())
+        .limit(1)
     )
-    return {
-        **global_meta,
+
+    base: dict[str, Any] = {
         "establishment_id": int(est.id),
         "establishment_code": str(est.code or ""),
         "establishment_description": est.description,
-        "local_row_count": int(local_count or 0),
+        "status": "none",
+        "job_id": None,
+        "progress": 0,
+        "message": "No hay reporte generado para este local.",
+        "filename": None,
+        "download_url": None,
+        "file_size_bytes": None,
+        "generated_at": None,
+        "expires_at": None,
     }
+    if job is None:
+        return base
+
+    generated_at = job.updated_at if job.state == "success" else job.created_at
+    return {
+        **base,
+        "status": job.state,
+        "job_id": str(job.id),
+        "progress": int(job.progress or 0),
+        "message": job.message or "",
+        "filename": job.filename,
+        "download_url": job.download_url,
+        "file_size_bytes": job.file_size_bytes,
+        "generated_at": generated_at.isoformat() if generated_at else None,
+        "expires_at": job.expires_at.isoformat() if job.expires_at else None,
+    }
+
+
+def get_reporte_aptot_locales_cache_meta(
+    db: Session,
+    tenant_id: UUID,
+    establishment_id: int,
+) -> dict[str, Any]:
+    """Alias retrocompatible; usar ``get_reporte_aptot_locales_export_meta``."""
+    return get_reporte_aptot_locales_export_meta(db, tenant_id, establishment_id)

@@ -8,7 +8,7 @@ from typing import Any
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.modules.iam.models import User
@@ -17,7 +17,6 @@ from app.modules.inventory.attendance_models import (
     InvAttendanceLocationSample,
     InvAttendanceMark,
     InvAttendanceSession,
-    InvUserEstablishmentAssignment,
 )
 
 LIMA_TZ = ZoneInfo("America/Lima")
@@ -62,7 +61,7 @@ def evaluate_geofence(
     return False, dist, "FUERA_DEL_AREA"
 
 
-def _establishment_row(est: m.InvEstablishment) -> dict[str, Any]:
+def _establishment_row(est: m.InvEstablishment, *, hojas_count: int = 0) -> dict[str, Any]:
     return {
         "id": int(est.id),
         "code": est.code,
@@ -71,21 +70,43 @@ def _establishment_row(est: m.InvEstablishment) -> dict[str, Any]:
         "latitude": est.latitude,
         "longitude": est.longitude,
         "geofence_radius_m": est.geofence_radius_m or 100,
+        "hojas_count": hojas_count,
     }
 
 
-def list_user_establishments(db: Session, tenant_id: UUID, user_id: UUID) -> list[dict[str, Any]]:
-    assigned_ids = db.scalars(
-        select(InvUserEstablishmentAssignment.establishment_id).where(
-            InvUserEstablishmentAssignment.tenant_id == tenant_id,
-            InvUserEstablishmentAssignment.user_id == user_id,
+def _user_establishment_ids_from_hojas(
+    db: Session, tenant_id: UUID, user_id: UUID
+) -> dict[int, int]:
+    """Locales distintos del inventariador según hojas de captura (id_inventariador / id_digitador)."""
+    rows = db.execute(
+        select(m.InvEnvironment.establishment_id, func.count(m.InvCard.id))
+        .join(m.InvCard, m.InvCard.id_ambiente == m.InvEnvironment.id)
+        .where(
+            m.InvCard.tenant_id == tenant_id,
+            m.InvEnvironment.tenant_id == tenant_id,
+            or_(
+                m.InvCard.id_inventariador == user_id,
+                m.InvCard.id_digitador == user_id,
+            ),
         )
+        .group_by(m.InvEnvironment.establishment_id)
     ).all()
-    q = select(m.InvEstablishment).where(m.InvEstablishment.tenant_id == tenant_id)
-    if assigned_ids:
-        q = q.where(m.InvEstablishment.id.in_(assigned_ids))
-    q = q.order_by(m.InvEstablishment.description.asc())
-    return [_establishment_row(e) for e in db.scalars(q).all()]
+    return {int(est_id): int(count) for est_id, count in rows}
+
+
+def list_user_establishments(db: Session, tenant_id: UUID, user_id: UUID) -> list[dict[str, Any]]:
+    by_est = _user_establishment_ids_from_hojas(db, tenant_id, user_id)
+    if not by_est:
+        return []
+    ests = db.scalars(
+        select(m.InvEstablishment)
+        .where(
+            m.InvEstablishment.tenant_id == tenant_id,
+            m.InvEstablishment.id.in_(by_est.keys()),
+        )
+        .order_by(m.InvEstablishment.description.asc())
+    ).all()
+    return [_establishment_row(e, hojas_count=by_est.get(int(e.id), 0)) for e in ests]
 
 
 def preview_geofence(
@@ -120,27 +141,11 @@ def _get_establishment(db: Session, tenant_id: UUID, establishment_id: int) -> m
 def _assert_establishment_access(
     db: Session, tenant_id: UUID, user_id: UUID, establishment_id: int
 ) -> None:
-    assigned = db.scalar(
-        select(func.count())
-        .select_from(InvUserEstablishmentAssignment)
-        .where(
-            InvUserEstablishmentAssignment.tenant_id == tenant_id,
-            InvUserEstablishmentAssignment.user_id == user_id,
-        )
-    )
-    if not assigned:
-        return
-    ok = db.scalar(
-        select(func.count())
-        .select_from(InvUserEstablishmentAssignment)
-        .where(
-            InvUserEstablishmentAssignment.tenant_id == tenant_id,
-            InvUserEstablishmentAssignment.user_id == user_id,
-            InvUserEstablishmentAssignment.establishment_id == establishment_id,
-        )
-    )
-    if not ok:
-        raise ValueError("El establecimiento no está asignado a su usuario.")
+    by_est = _user_establishment_ids_from_hojas(db, tenant_id, user_id)
+    if not by_est:
+        raise ValueError("No tiene hojas de captura asignadas con local.")
+    if establishment_id not in by_est:
+        raise ValueError("El local no corresponde a sus hojas de captura asignadas.")
 
 
 def _get_open_session(
@@ -542,41 +547,3 @@ def get_panel_session_detail(db: Session, tenant_id: UUID, session_id: int) -> d
         ],
         "productivity": prod,
     }
-
-
-def set_user_assignments(
-    db: Session,
-    tenant_id: UUID,
-    user_id: UUID,
-    establishment_ids: list[int],
-) -> dict[str, Any]:
-    db.execute(
-        InvUserEstablishmentAssignment.__table__.delete().where(
-            InvUserEstablishmentAssignment.tenant_id == tenant_id,
-            InvUserEstablishmentAssignment.user_id == user_id,
-        )
-    )
-    for eid in establishment_ids:
-        est = _get_establishment(db, tenant_id, eid)
-        _ = est
-        db.add(
-            InvUserEstablishmentAssignment(
-                tenant_id=tenant_id,
-                user_id=user_id,
-                establishment_id=eid,
-            )
-        )
-    db.commit()
-    return {"success": True, "message": "Asignaciones actualizadas", "count": len(establishment_ids)}
-
-
-def list_user_assignments(db: Session, tenant_id: UUID, user_id: UUID) -> list[int]:
-    return [
-        int(x)
-        for x in db.scalars(
-            select(InvUserEstablishmentAssignment.establishment_id).where(
-                InvUserEstablishmentAssignment.tenant_id == tenant_id,
-                InvUserEstablishmentAssignment.user_id == user_id,
-            )
-        ).all()
-    ]
