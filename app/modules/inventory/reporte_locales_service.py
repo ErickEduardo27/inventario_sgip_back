@@ -89,6 +89,30 @@ def list_reporte_locales(
     return {"data": data, "meta": paged_meta(total, page, per_page)}
 
 
+def list_establishment_situaciones(db: Session, tenant_id: UUID) -> dict[str, Any]:
+    """Situación de reporte locales por establishment (mapa de locales)."""
+    rows = db.execute(
+        select(m.InvEstablishment.id, m.InvReporteLocal.situacion)
+        .outerjoin(
+            m.InvReporteLocal,
+            and_(
+                m.InvReporteLocal.establishment_id == m.InvEstablishment.id,
+                m.InvReporteLocal.tenant_id == tenant_id,
+            ),
+        )
+        .where(m.InvEstablishment.tenant_id == tenant_id)
+        .order_by(m.InvEstablishment.code.asc()),
+    ).all()
+    data = [
+        {
+            "establishment_id": int(est_id),
+            "situacion": (situacion or "pendiente") if situacion in SITUACION_VALUES else "pendiente",
+        }
+        for est_id, situacion in rows
+    ]
+    return {"data": data}
+
+
 def _get_or_create_reporte_row(
     db: Session,
     tenant_id: UUID,

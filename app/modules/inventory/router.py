@@ -313,6 +313,17 @@ def establishment_get(row_id: int, db: Session = Depends(get_db), tenant_id: UUI
     return out
 
 
+@router.get("/locales/mapa/situaciones")
+def locales_mapa_situaciones(
+    db: Session = Depends(get_db),
+    tenant_id: UUID = Depends(get_tenant_id),
+    _: User = Depends(require_permission("locales_mapa", "view")),
+):
+    from app.modules.inventory import reporte_locales_service as reporte_locales
+
+    return reporte_locales.list_establishment_situaciones(db, tenant_id)
+
+
 @router.delete("/establishments/{row_id}", response_model=OkPayload)
 def establishment_delete(
     row_id: int,
@@ -1393,6 +1404,7 @@ def inventory_dashboard_establishment_stats(
     page: int = Query(1, ge=1),
     per_page: int = Query(20, ge=1, le=100),
     search: str | None = Query(None, description="Filtrar por código o nombre de local"),
+    live: bool = Query(False, description="Calcular en vivo sin usar cache materializado"),
 ):
     return inv.inventory_dashboard_establishment_stats(
         db,
@@ -1400,6 +1412,7 @@ def inventory_dashboard_establishment_stats(
         page=page,
         per_page=per_page,
         search=search,
+        live=live,
     )
 
 
@@ -1717,9 +1730,15 @@ def reporte_aptot_locales_export_meta(
     db: Session = Depends(get_db),
     tenant_id: UUID = Depends(get_tenant_id),
     _: User = Depends(require_permission("reporte_aptot_locales", "view")),
+    export_format: Literal["csv", "xlsx"] = Query("csv", description="Formato del último reporte generado"),
 ):
     try:
-        return inv.get_reporte_aptot_locales_export_meta(db, tenant_id, establishment_id)
+        return inv.get_reporte_aptot_locales_export_meta(
+            db,
+            tenant_id,
+            establishment_id,
+            export_format=export_format,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -1730,10 +1749,16 @@ def reporte_aptot_locales_cache_meta(
     db: Session = Depends(get_db),
     tenant_id: UUID = Depends(get_tenant_id),
     _: User = Depends(require_permission("reporte_aptot_locales", "view")),
+    export_format: Literal["csv", "xlsx"] = Query("csv"),
 ):
     """Retrocompatible; delega en ``export-meta``."""
     try:
-        return inv.get_reporte_aptot_locales_export_meta(db, tenant_id, establishment_id)
+        return inv.get_reporte_aptot_locales_export_meta(
+            db,
+            tenant_id,
+            establishment_id,
+            export_format=export_format,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -1744,6 +1769,7 @@ def reporte_aptot_locales_export_start(
     db: Session = Depends(get_db),
     tenant_id: UUID = Depends(get_tenant_id),
     user: User = Depends(require_permission("reporte_aptot_locales", "export")),
+    export_format: Literal["csv", "xlsx"] = Query("csv", description="Formato del archivo: csv o xlsx"),
 ):
     try:
         return DescargaArchivoStartResponse(
@@ -1751,6 +1777,7 @@ def reporte_aptot_locales_export_start(
                 db,
                 tenant_id=tenant_id,
                 establishment_id=establishment_id,
+                export_format=export_format,
                 created_by_id=user.id,
             )
         )

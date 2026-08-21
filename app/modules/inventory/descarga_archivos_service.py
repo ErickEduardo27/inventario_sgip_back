@@ -160,6 +160,7 @@ def schedule_reporte_aptot_locales_export(
     *,
     tenant_id: UUID,
     establishment_id: int,
+    export_format: str = "csv",
     created_by_id: UUID | None = None,
 ) -> dict[str, Any]:
     from app.modules.inventory import models as m
@@ -169,9 +170,14 @@ def schedule_reporte_aptot_locales_export(
     if not est or est.tenant_id != tenant_id:
         raise ValueError("Local no encontrado")
 
+    fmt = (export_format or "csv").strip().lower()
+    if fmt not in ("csv", "xlsx"):
+        fmt = "csv"
+    ext = "xlsx" if fmt == "xlsx" else "csv"
+
     job_id = uuid.uuid4()
     code = str(est.code or establishment_id).strip() or str(establishment_id)
-    filename = f"reporte_aptot_locales_{establishment_id}_{code}_{date.today().isoformat()}.csv"
+    filename = f"reporte_aptot_locales_{establishment_id}_{code}_{date.today().isoformat()}.{ext}"
     row = create_descarga_archivo(
         db,
         job_id=job_id,
@@ -186,15 +192,17 @@ def schedule_reporte_aptot_locales_export(
         str(job_id),
         str(tenant_id),
         int(establishment_id),
+        fmt,
     )
     set_celery_task_id(db, row, task.id)
     db.commit()
 
+    label = "Excel" if fmt == "xlsx" else "CSV"
     return {
         "success": True,
         "async_job": True,
         "job_id": str(job_id),
-        "message": "Generación del reporte APTOT del local encolada. Podrá descargarlo cuando finalice.",
+        "message": f"Generación del reporte APTOT del local ({label}) encolada. Podrá descargarlo cuando finalice.",
     }
 
 

@@ -2353,6 +2353,7 @@ def inventory_dashboard_establishment_stats(
     page: int = 1,
     per_page: int = 20,
     search: str | None = None,
+    live: bool = False,
 ) -> dict[str, Any]:
     """Totales por local desde cache materializado (SELECT rápido)."""
     from app.modules.inventory.dashboard_establishment_stats_cache import (
@@ -2360,8 +2361,7 @@ def inventory_dashboard_establishment_stats(
         # schedule_dashboard_establishment_stats_tenant_refresh,
     )
 
-    if dashboard_establishment_stats_cache_count(db, tenant_id) == 0:
-        # schedule_dashboard_establishment_stats_tenant_refresh(tenant_id)
+    if live or dashboard_establishment_stats_cache_count(db, tenant_id) == 0:
         return _inventory_dashboard_establishment_stats_live(
             db,
             tenant_id,
@@ -2630,12 +2630,19 @@ def get_reporte_aptot_locales_export_meta(
     db: Session,
     tenant_id: UUID,
     establishment_id: int,
+    *,
+    export_format: str = "csv",
 ) -> dict[str, Any]:
     from sqlalchemy import select
 
     est = db.get(m.InvEstablishment, establishment_id)
     if not est or est.tenant_id != tenant_id:
         raise ValueError("Local no encontrado")
+
+    fmt = (export_format or "csv").strip().lower()
+    if fmt not in ("csv", "xlsx"):
+        fmt = "csv"
+    suffix = ".xlsx" if fmt == "xlsx" else ".csv"
 
     prefix = f"reporte_aptot_locales_{establishment_id}_"
     job = db.scalar(
@@ -2644,6 +2651,7 @@ def get_reporte_aptot_locales_export_meta(
             m.InvDescargaArchivo.tenant_id == tenant_id,
             m.InvDescargaArchivo.module == "reporte_aptot_locales",
             m.InvDescargaArchivo.filename.like(f"{prefix}%"),
+            m.InvDescargaArchivo.filename.ilike(f"%{suffix}"),
         )
         .order_by(m.InvDescargaArchivo.created_at.desc())
         .limit(1)
@@ -2653,10 +2661,11 @@ def get_reporte_aptot_locales_export_meta(
         "establishment_id": int(est.id),
         "establishment_code": str(est.code or ""),
         "establishment_description": est.description,
+        "export_format": fmt,
         "status": "none",
         "job_id": None,
         "progress": 0,
-        "message": "No hay reporte generado para este local.",
+        "message": f"No hay reporte {suffix.lstrip('.').upper()} generado para este local.",
         "filename": None,
         "download_url": None,
         "file_size_bytes": None,
