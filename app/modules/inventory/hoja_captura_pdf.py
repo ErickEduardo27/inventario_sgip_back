@@ -298,9 +298,9 @@ def _build_item_count_note(item_count: int, st: dict[str, ParagraphStyle]) -> li
 
 def _resolve_logo_bytes(db: Session, tenant_id: UUID) -> bytes | None:
     row = db.scalar(select(WorkspaceSettings).where(WorkspaceSettings.tenant_id == tenant_id))
-    if not row or not row.logo_url:
+    if not row or not row.pdf_logo_url:
         return None
-    return read_tenant_logo_bytes(row.logo_url, tenant_id)
+    return read_tenant_logo_bytes(row.pdf_logo_url, tenant_id)
 
 
 def _load_logo_image(logo_bytes: bytes | None) -> Image | None:

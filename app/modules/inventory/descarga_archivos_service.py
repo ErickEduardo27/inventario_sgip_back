@@ -247,6 +247,40 @@ def schedule_item_cards_export(
     }
 
 
+def schedule_hoja_captura_export(
+    db: Session,
+    *,
+    tenant_id: UUID,
+    q,
+    created_by_id: UUID | None = None,
+) -> dict[str, Any]:
+    from app.tasks.csv_exports import export_hoja_captura_task
+
+    job_id = uuid.uuid4()
+    filename = f"hoja_captura_export_{date.today().isoformat()}.xlsx"
+    row = create_descarga_archivo(
+        db,
+        job_id=job_id,
+        tenant_id=tenant_id,
+        module="hoja_captura",
+        filename=filename,
+        created_by_id=created_by_id,
+    )
+    db.commit()
+
+    query_dict = q.model_dump(mode="json")
+    task = export_hoja_captura_task.delay(str(job_id), str(tenant_id), query_dict)
+    set_celery_task_id(db, row, task.id)
+    db.commit()
+
+    return {
+        "success": True,
+        "async_job": True,
+        "job_id": str(job_id),
+        "message": "Exportación Excel encolada. Le avisaremos cuando el archivo esté listo para descargar.",
+    }
+
+
 def get_descarga_archivo_status(db: Session, job_id: UUID, tenant_id: UUID) -> dict[str, Any]:
     row = get_descarga_archivo(db, job_id, tenant_id)
     if row is None:

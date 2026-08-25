@@ -14,9 +14,12 @@ class SettingsBase(BaseModel):
     currency: str = Field(default="PEN", max_length=10)
     timezone: str = Field(default="America/Lima", max_length=80)
     logo_url: str | None = Field(default=None, max_length=500)
+    pdf_logo_url: str | None = Field(default=None, max_length=500)
     google_cloud_info: dict[str, Any] = Field(default_factory=dict)
     alerts_config: dict[str, Any] = Field(default_factory=dict)
     portal_branding: dict[str, Any] = Field(default_factory=dict)
+    feature_flags: dict[str, Any] = Field(default_factory=dict)
+    custom_components: dict[str, str] = Field(default_factory=dict)
     integration_notes: str | None = None
 
 
@@ -30,9 +33,12 @@ class SettingsUpdate(BaseModel):
     currency: str | None = Field(default=None, max_length=10)
     timezone: str | None = Field(default=None, max_length=80)
     logo_url: str | None = Field(default=None, max_length=500)
+    pdf_logo_url: str | None = Field(default=None, max_length=500)
     google_cloud_info: dict[str, Any] | None = None
     alerts_config: dict[str, Any] | None = None
     portal_branding: dict[str, Any] | None = None
+    feature_flags: dict[str, Any] | None = None
+    custom_components: dict[str, str] | None = None
     integration_notes: str | None = None
 
 

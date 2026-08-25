@@ -5,7 +5,7 @@ from __future__ import annotations
 import calendar
 import math
 import uuid as uuid_mod
-from datetime import date, datetime, time, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
 from uuid import UUID
 
@@ -256,11 +256,11 @@ def upsert_establishment(db: Session, tenant_id: UUID, body: EstablishmentWrite)
         db.add(row)
         db.commit()
         db.refresh(row)
-        # Actualización automática del resumen dashboard deshabilitada (usar refresh manual).
-        # from app.modules.inventory.dashboard_establishment_stats_cache import (
-        #     schedule_dashboard_establishment_stats_refresh,
-        # )
-        # schedule_dashboard_establishment_stats_refresh(tenant_id, [int(row.id)])
+        from app.modules.inventory.dashboard_establishment_stats_cache import (
+            schedule_dashboard_establishment_stats_refresh,
+        )
+
+        schedule_dashboard_establishment_stats_refresh(tenant_id, [int(row.id)])
         return row
     data = body.model_dump(exclude=_PHOTO_WRITE_EXCLUDE)
     row = m.InvEstablishment(tenant_id=tenant_id, **data)
@@ -268,10 +268,11 @@ def upsert_establishment(db: Session, tenant_id: UUID, body: EstablishmentWrite)
     db.add(row)
     db.commit()
     db.refresh(row)
-    # from app.modules.inventory.dashboard_establishment_stats_cache import (
-    #     schedule_dashboard_establishment_stats_refresh,
-    # )
-    # schedule_dashboard_establishment_stats_refresh(tenant_id, [int(row.id)])
+    from app.modules.inventory.dashboard_establishment_stats_cache import (
+        schedule_dashboard_establishment_stats_refresh,
+    )
+
+    schedule_dashboard_establishment_stats_refresh(tenant_id, [int(row.id)])
     from app.modules.inventory.reporte_locales_service import ensure_reporte_local_row
 
     ensure_reporte_local_row(db, tenant_id, int(row.id), commit=True)
@@ -948,20 +949,21 @@ def upsert_card(
         db.add(row)
         db.commit()
         db.refresh(row)
-        # Actualización automática del resumen dashboard deshabilitada (usar refresh manual).
-        # from app.modules.inventory.dashboard_establishment_stats_cache import (
-        #     schedule_dashboard_establishment_stats_refresh,
-        # )
-        # est_ids: list[int] = []
-        # if row.id_ambiente:
-        #     new_env = db.get(m.InvEnvironment, row.id_ambiente)
-        #     if new_env and new_env.establishment_id:
-        #         est_ids.append(int(new_env.establishment_id))
-        # if old_ambiente_id and old_ambiente_id != row.id_ambiente:
-        #     old_env = db.get(m.InvEnvironment, old_ambiente_id)
-        #     if old_env and old_env.establishment_id:
-        #         est_ids.append(int(old_env.establishment_id))
-        # schedule_dashboard_establishment_stats_refresh(tenant_id, est_ids)
+        from app.modules.inventory.dashboard_establishment_stats_cache import (
+            schedule_dashboard_establishment_stats_refresh,
+        )
+
+        est_ids: list[int] = []
+        if row.id_ambiente:
+            new_env = db.get(m.InvEnvironment, row.id_ambiente)
+            if new_env and new_env.establishment_id:
+                est_ids.append(int(new_env.establishment_id))
+        if old_ambiente_id and old_ambiente_id != row.id_ambiente:
+            old_env = db.get(m.InvEnvironment, old_ambiente_id)
+            if old_env and old_env.establishment_id:
+                est_ids.append(int(old_env.establishment_id))
+        if est_ids:
+            schedule_dashboard_establishment_stats_refresh(tenant_id, est_ids)
         return row
 
     if _hoj_num_taken(db, tenant_id, hoj_n):
@@ -1447,6 +1449,17 @@ def store_card_item(
         ict = db.get(m.InvItemCard, body.id)
         if not ict or ict.tenant_id != tenant_id or ict.id_card != card_id:
             return False, "Ítem no encontrado en esta hoja"
+        item_inv_sit_before = ict.inv_sit
+        marg_inv_sit_before: str | None = None
+        if ict.id_margesi:
+            prev_marg = db.get(m.InvMargesiItem, ict.id_margesi)
+            if prev_marg and prev_marg.tenant_id == tenant_id:
+                marg_inv_sit_before = prev_marg.inv_sit
+        pending_marg_inv_sit_before: str | None = None
+        if body.id_margesi and not body.no_conciliar and not ict.id_margesi:
+            pending_marg = db.get(m.InvMargesiItem, body.id_margesi)
+            if pending_marg and pending_marg.tenant_id == tenant_id:
+                pending_marg_inv_sit_before = pending_marg.inv_sit
         ict.inv_num = body.inv_num
         ict.inv_num_1 = body.inv_num_1
         ict.inv_num_2 = body.inv_num_2
@@ -1502,16 +1515,41 @@ def store_card_item(
         except IntegrityError:
             db.rollback()
             return False, "Número de inventario ya registrado"
-        # from app.modules.inventory.dashboard_establishment_stats_cache import (
-        #     schedule_dashboard_stats_after_card_item_change,
-        # )
-        # linked_marg = db.get(m.InvMargesiItem, ict.id_margesi) if ict.id_margesi else None
-        # schedule_dashboard_stats_after_card_item_change(
-        #     db,
-        #     tenant_id,
-        #     card_id=card_id,
-        #     margesi_row=linked_marg,
-        # )
+        from app.modules.inventory.dashboard_establishment_stats_cache import (
+            establishment_ids_for_card,
+            schedule_dashboard_stats_after_card_item_change,
+        )
+        from app.modules.inventory.dashboard_establishment_stats_incremental import (
+            EntityTransition,
+            change_for_establishment,
+            itemcard_update_transition,
+            margesi_update_transition,
+        )
+
+        est_ids = establishment_ids_for_card(db, tenant_id, card_id)
+        if est_ids:
+            transitions: list[EntityTransition] = []
+            if item_inv_sit_before != ict.inv_sit:
+                transitions.append(itemcard_update_transition(item_inv_sit_before, ict.inv_sit))
+            if pending_marg_inv_sit_before is not None and ict.id_margesi:
+                linked_marg = db.get(m.InvMargesiItem, ict.id_margesi)
+                if linked_marg:
+                    transitions.append(
+                        margesi_update_transition(pending_marg_inv_sit_before, linked_marg.inv_sit),
+                    )
+            elif marg_inv_sit_before is not None and ict.id_margesi:
+                linked_marg = db.get(m.InvMargesiItem, ict.id_margesi)
+                if linked_marg and marg_inv_sit_before != linked_marg.inv_sit:
+                    transitions.append(
+                        margesi_update_transition(marg_inv_sit_before, linked_marg.inv_sit),
+                    )
+            if transitions:
+                schedule_dashboard_stats_after_card_item_change(
+                    db,
+                    tenant_id,
+                    card_id=card_id,
+                    changes=[change_for_establishment(est_ids[0], *transitions)],
+                )
         return True, "Item modificado"
 
     mar_cpat_base = (body.mar_cpat or "").strip()
@@ -1520,10 +1558,12 @@ def store_card_item(
         id_margesi = None
 
     marg_row: m.InvMargesiItem | None = None
+    marg_inv_sit_before: str | None = None
     if id_margesi:
         marg_row = db.get(m.InvMargesiItem, id_margesi)
         if marg_row is None or marg_row.tenant_id != tenant_id:
             return False, "Registro Margesi no encontrado"
+        marg_inv_sit_before = marg_row.inv_sit
         if not mar_cpat_base and marg_row.mar_cpat:
             mar_cpat_base = str(marg_row.mar_cpat).strip()
 
@@ -1593,15 +1633,27 @@ def store_card_item(
     except IntegrityError:
         db.rollback()
         return False, "Número de inventario ya registrado"
-    # from app.modules.inventory.dashboard_establishment_stats_cache import (
-    #     schedule_dashboard_stats_after_card_item_change,
-    # )
-    # schedule_dashboard_stats_after_card_item_change(
-    #     db,
-    #     tenant_id,
-    #     card_id=card_id,
-    #     margesi_row=marg_row,
-    # )
+    from app.modules.inventory.dashboard_establishment_stats_cache import (
+        establishment_ids_for_card,
+        schedule_dashboard_stats_after_card_item_change,
+    )
+    from app.modules.inventory.dashboard_establishment_stats_incremental import (
+        change_for_establishment,
+        itemcard_create_transition,
+        margesi_update_transition,
+    )
+
+    est_ids = establishment_ids_for_card(db, tenant_id, card_id)
+    if est_ids:
+        transitions = [itemcard_create_transition(ict.inv_sit)]
+        if marg_row is not None and marg_inv_sit_before is not None:
+            transitions.append(margesi_update_transition(marg_inv_sit_before, marg_row.inv_sit))
+        schedule_dashboard_stats_after_card_item_change(
+            db,
+            tenant_id,
+            card_id=card_id,
+            changes=[change_for_establishment(est_ids[0], *transitions)],
+        )
     return True, "Item agregado"
 
 
@@ -1731,6 +1783,7 @@ def translate_item_card(db: Session, tenant_id: UUID, item_id: int, body: ItemCa
         return False, "Registro no encontrado"
     if {old.tenant_id, new.tenant_id, rec.tenant_id} != {tenant_id}:
         return False, "Registro no encontrado"
+    item_inv_sit = rec.inv_sit
     old.hoj_can_tot = max(0, int(old.hoj_can_tot or 0) - 1)
     new.hoj_can_tot = int(new.hoj_can_tot or 0) + 1
     rec.id_card = body.id_card
@@ -1738,15 +1791,17 @@ def translate_item_card(db: Session, tenant_id: UUID, item_id: int, body: ItemCa
     db.add(new)
     db.add(rec)
     db.commit()
-    # from app.modules.inventory.dashboard_establishment_stats_cache import (
-    #     schedule_dashboard_stats_after_item_move,
-    # )
-    # schedule_dashboard_stats_after_item_move(
-    #     db,
-    #     tenant_id,
-    #     old_card_id=int(body.id_card_old),
-    #     new_card_id=int(body.id_card),
-    # )
+    from app.modules.inventory.dashboard_establishment_stats_cache import (
+        schedule_dashboard_stats_after_item_move,
+    )
+
+    schedule_dashboard_stats_after_item_move(
+        db,
+        tenant_id,
+        old_card_id=int(body.id_card_old),
+        new_card_id=int(body.id_card),
+        item_inv_sit=item_inv_sit,
+    )
     return True, "Bien actualizado"
 
 
@@ -1766,11 +1821,14 @@ def delete_item_card(
             return False, "Registro no encontrado"
         if item.id_card != id_card:
             return False, "El bien no pertenece a la hoja indicada"
+        item_inv_sit_before = item.inv_sit
+        marg_inv_sit_before: str | None = None
         card.hoj_can_tot = max(0, int(card.hoj_can_tot or 0) - 1)
         linked_marg: m.InvMargesiItem | None = None
         if item.id_margesi:
             marg = db.get(m.InvMargesiItem, item.id_margesi)
             if marg and marg.tenant_id == tenant_id:
+                marg_inv_sit_before = marg.inv_sit
                 marg.inv_num = None
                 marg.inv_hoj = None
                 marg.inv_sit = None
@@ -1791,15 +1849,27 @@ def delete_item_card(
         db.delete(item)
         db.add(card)
         db.commit()
-        # from app.modules.inventory.dashboard_establishment_stats_cache import (
-        #     schedule_dashboard_stats_after_card_item_change,
-        # )
-        # schedule_dashboard_stats_after_card_item_change(
-        #     db,
-        #     tenant_id,
-        #     card_id=id_card,
-        #     margesi_row=linked_marg,
-        # )
+        from app.modules.inventory.dashboard_establishment_stats_cache import (
+            establishment_ids_for_card,
+            schedule_dashboard_stats_after_card_item_change,
+        )
+        from app.modules.inventory.dashboard_establishment_stats_incremental import (
+            change_for_establishment,
+            itemcard_delete_transition,
+            margesi_update_transition,
+        )
+
+        est_ids = establishment_ids_for_card(db, tenant_id, id_card)
+        if est_ids:
+            transitions = [itemcard_delete_transition(item_inv_sit_before)]
+            if linked_marg is not None and marg_inv_sit_before is not None:
+                transitions.append(margesi_update_transition(marg_inv_sit_before, linked_marg.inv_sit))
+            schedule_dashboard_stats_after_card_item_change(
+                db,
+                tenant_id,
+                card_id=id_card,
+                changes=[change_for_establishment(est_ids[0], *transitions)],
+            )
         return True, "Bien eliminado con éxito"
     except Exception as e:  # noqa: BLE001
         db.rollback()
@@ -2271,6 +2341,43 @@ def _include_user_assigned_bienes(
     return effective_from <= _USER_ASSIGNED_BIENES_DESDE_CUTOFF
 
 
+def _count_dashboard_bienes(
+    db: Session,
+    tenant_id: UUID,
+    *,
+    start_dt: datetime,
+    end_dt: datetime,
+    establishment_id: int | None,
+) -> int:
+    stmt = (
+        select(func.count(m.InvItemCard.id))
+        .select_from(m.InvItemCard)
+        .join(m.InvCard, m.InvItemCard.id_card == m.InvCard.id)
+        .join(m.InvEnvironment, m.InvCard.id_ambiente == m.InvEnvironment.id)
+        .where(
+            m.InvItemCard.tenant_id == tenant_id,
+            m.InvItemCard.created_at >= start_dt,
+            m.InvItemCard.created_at <= end_dt,
+        )
+    )
+    if establishment_id:
+        stmt = stmt.where(m.InvEnvironment.establishment_id == establishment_id)
+    return int(db.scalar(stmt) or 0)
+
+
+def _dashboard_margesi_pendientes(
+    db: Session,
+    tenant_id: UUID,
+    establishment_id: int | None = None,
+) -> int:
+    stmt = select(func.coalesce(func.sum(m.InvDashboardEstablishmentStat.margesi_faltantes), 0)).where(
+        m.InvDashboardEstablishmentStat.tenant_id == tenant_id,
+    )
+    if establishment_id:
+        stmt = stmt.where(m.InvDashboardEstablishmentStat.establishment_id == establishment_id)
+    return int(db.scalar(stmt) or 0)
+
+
 def inventory_dashboard(
     db: Session,
     tenant_id: UUID,
@@ -2337,10 +2444,24 @@ def inventory_dashboard(
         for ym in months
     ]
 
+    span_days = (range_end - range_start).days + 1
+    prev_end = range_start - timedelta(days=1)
+    prev_start = prev_end - timedelta(days=max(span_days - 1, 0))
+    bienes_prev_total = _count_dashboard_bienes(
+        db,
+        tenant_id,
+        start_dt=_as_start(prev_start),
+        end_dt=_as_end(prev_end),
+        establishment_id=establishment_id,
+    )
+    margesi_pendientes = _dashboard_margesi_pendientes(db, tenant_id, establishment_id)
+
     return {
         "kpis": {
             "bienes_total": sum(bienes_by_month.values()),
             "margesi_total": sum(margesi_by_month.values()),
+            "bienes_prev_total": bienes_prev_total,
+            "margesi_pendientes": margesi_pendientes,
         },
         "by_month": by_month,
     }

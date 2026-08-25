@@ -1,9 +1,10 @@
 """Importación masiva de hojas de captura (cabecera ``cards``) desde Excel/CSV.
 
-Fila 1 = encabezado (descartada). Columnas por índice (A–G):
+Fila 1 = encabezado (descartada). Columnas por índice (A–I):
   A Número de hoja, B hoj_fec, C code_ambiente, D code_ccosto,
   E number_usuario (opcional; vacío o 0 = sin responsable),
-  F number_digitador, G number_inventariador.
+  F number_digitador, G number_inventariador,
+  H nota_interna (opcional), I nota_ficha (opcional).
 
 Los números de digitador/inventariador se resuelven vía ``persons.number`` → ``users.email``.
 Si el digitador no se encuentra, se usa el usuario que ejecuta la importación.
@@ -32,6 +33,8 @@ _IMPORT_FIELD_NAMES = (
     "person_document",
     "digitador_number",
     "inventariador_number",
+    "nota_interna",
+    "nota_ficha",
 )
 
 MAX_IMPORT_WARNINGS = 30
@@ -141,6 +144,8 @@ def bulk_import_cards(
             _csv_cell(person_doc),
             _csv_cell(dig_number),
             inv_number[:50],
+            _csv_cell(_cell_str(row.get("nota_interna"))),
+            _csv_cell(_cell_str(row.get("nota_ficha"))),
         ]
 
     staging = list(staging_by_hoj.values())
@@ -183,7 +188,9 @@ def bulk_import_cards(
                     cc_code VARCHAR(100) NOT NULL,
                     person_document VARCHAR(50),
                     digitador_number VARCHAR(50),
-                    inventariador_number VARCHAR(50) NOT NULL
+                    inventariador_number VARCHAR(50) NOT NULL,
+                    nota_interna TEXT,
+                    nota_ficha TEXT
                 ) ON COMMIT DROP
             """,
             columns=(
@@ -194,11 +201,29 @@ def bulk_import_cards(
                 "person_document",
                 "digitador_number",
                 "inventariador_number",
+                "nota_interna",
+                "nota_ficha",
             ),
             rows=staging,
         )
         if progress_cb:
             progress_cb(25, len(staging), 0, 0)
+
+        cur.execute(
+            """
+            CREATE TEMP TABLE tmp_cards_est_before ON COMMIT DROP AS
+            SELECT c.id AS card_id, env.establishment_id
+            FROM cards c
+            INNER JOIN tmp_cards_import t
+                ON c.tenant_id = %s::uuid
+               AND c.hoj_num = NULLIF(regexp_replace(trim(t.hoj_num), '[^0-9]', '', 'g'), '')::bigint
+            INNER JOIN enviroments env
+                ON env.id = c.id_ambiente
+               AND env.tenant_id = c.tenant_id
+            WHERE env.establishment_id IS NOT NULL
+            """,
+            (tenant_s,),
+        )
 
         cur.execute(
             """
@@ -263,7 +288,8 @@ def bulk_import_cards(
                 INSERT INTO cards (
                     tenant_id, hoj_num, hoj_fec, id_ambiente, id_ccosto, id_usuario,
                     id_inventariador, id_digitador,
-                    state, hoj_can_tot, flag_firma
+                    state, hoj_can_tot, flag_firma,
+                    nota_interna, nota_ficha
                 )
                 SELECT
                     %s::uuid,
@@ -276,7 +302,9 @@ def bulk_import_cards(
                     r.id_digitador,
                     1,
                     0,
-                    false
+                    false,
+                    NULLIF(trim(r.nota_interna), ''),
+                    NULLIF(trim(r.nota_ficha), '')
                 FROM resolved r
                 ON CONFLICT (tenant_id, hoj_num) DO UPDATE SET
                     hoj_fec = EXCLUDED.hoj_fec,
@@ -285,6 +313,8 @@ def bulk_import_cards(
                     id_usuario = EXCLUDED.id_usuario,
                     id_inventariador = EXCLUDED.id_inventariador,
                     id_digitador = EXCLUDED.id_digitador,
+                    nota_interna = COALESCE(NULLIF(trim(EXCLUDED.nota_interna), ''), cards.nota_interna),
+                    nota_ficha = COALESCE(NULLIF(trim(EXCLUDED.nota_ficha), ''), cards.nota_ficha),
                     updated_at = NOW()
                 RETURNING (xmax = 0) AS inserted
             )
@@ -350,6 +380,19 @@ def bulk_import_cards(
             progress_cb(90, int(registered), int(updated), int(inserted))
 
         db.commit()
+
+        from app.modules.inventory.dashboard_establishment_stats_cache import (
+            flush_dashboard_stats_batch,
+        )
+        from app.modules.inventory.dashboard_establishment_stats_incremental import (
+            DashboardStatsBatchCollector,
+            collect_cards_ambiente_move_deltas,
+        )
+
+        stats_batch = DashboardStatsBatchCollector()
+        stats_batch.merge_deltas(collect_cards_ambiente_move_deltas(db, tenant_id))
+        flush_dashboard_stats_batch(tenant_id, stats_batch)
+
         if progress_cb:
             progress_cb(100, int(registered), int(updated), int(inserted))
 

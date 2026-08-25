@@ -35,7 +35,6 @@ from app.modules.inventory import reporte_locales_service as reporte_locales
 from app.modules.inventory import service as inv
 from app.modules.inventory.csv_export import csv_download_response
 from app.modules.inventory.export_queries import (
-    build_cards_export_query,
     build_margesi_export_query,
     get_export_query,
 )
@@ -676,25 +675,46 @@ def cards_records(db: Session = Depends(get_db), tenant_id: UUID = Depends(get_t
     return PagedRows(data=rows, meta=PagedMeta(**inv.paged_meta(total, q.page, q.per_page)))
 
 
-@router.get("/hoja-captura/export")
-def hoja_captura_export(
+@router.post("/hoja-captura/export", response_model=DescargaArchivoStartResponse)
+def hoja_captura_export_start(
     db: Session = Depends(get_db),
     tenant_id: UUID = Depends(get_tenant_id),
+    user: User = Depends(require_permission("hoja_captura", "export")),
     q: RecordQuery = Depends(_q),
-    _: User = Depends(require_permission("hoja_captura", "export")),
 ):
-    """Export CSV de hojas; acepta ``search`` y ``flag_firma`` como el listado (COPY en PostgreSQL)."""
-    try:
-        inner_sql, params, filename_base = build_cards_export_query(tenant_id, q)
-        return csv_download_response(
+    """Encola exportación Excel: Celery genera XLSX, lo sube a GCS y guarda URL en ``descarga_archivos``."""
+    return DescargaArchivoStartResponse(
+        **dl_svc.schedule_hoja_captura_export(
             db,
             tenant_id=tenant_id,
-            inner_sql=inner_sql,
-            filename_base=filename_base,
-            params=params,
-        )
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail=f"Error al exportar CSV: {exc}") from exc
+            q=q,
+            created_by_id=user.id,
+        ),
+    )
+
+
+@router.get("/hoja-captura/export")
+def hoja_captura_export_get_not_allowed():
+    raise HTTPException(
+        status_code=405,
+        detail=(
+            "La exportación de hoja de captura es asíncrona. Use POST /api/inventory/hoja-captura/export "
+            "para encolar el trabajo y consulte GET /hoja-captura/export/{job_id} para el estado."
+        ),
+    )
+
+
+@router.get("/hoja-captura/export/{job_id}", response_model=DescargaArchivoStatus)
+def hoja_captura_export_status(
+    job_id: UUID,
+    db: Session = Depends(get_db),
+    tenant_id: UUID = Depends(get_tenant_id),
+    _: User = Depends(require_permission("hoja_captura", "export")),
+):
+    try:
+        return DescargaArchivoStatus(**dl_svc.get_descarga_archivo_status(db, job_id, tenant_id))
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @router.get("/cards/{row_id}")
@@ -1421,11 +1441,11 @@ def inventory_dashboard_establishment_stats_refresh(
     tenant_id: UUID = Depends(get_tenant_id),
     _: User = Depends(require_permission("dashboard", "view")),
 ):
-    """ from app.modules.inventory.dashboard_establishment_stats_cache import (
+    from app.modules.inventory.dashboard_establishment_stats_cache import (
         schedule_dashboard_establishment_stats_tenant_refresh,
     )
 
-    schedule_dashboard_establishment_stats_tenant_refresh(tenant_id) """
+    schedule_dashboard_establishment_stats_tenant_refresh(tenant_id)
     return OkPayload(success=True, message="Actualización del resumen por local encolada")
 
 
@@ -1817,6 +1837,7 @@ def descarga_archivo_file(
         "reporte_aptot_locales": ("reporte_aptot_locales", "export"),
         "reporte_locales": ("reporte_locales", "view"),
         "item_cards": ("bienes", "export"),
+        "hoja_captura": ("hoja_captura", "export"),
     }.get(row.module)
     if module_perm is None:
         raise HTTPException(status_code=404, detail="Archivo no disponible")

@@ -11,12 +11,11 @@ from sqlalchemy.orm import Session
 from app.core.inventory_numbers import format_inv_num, numeric_column_filter, try_parse_inventory_number
 from app.modules.inventory import models as m
 from app.modules.inventory.reporte_aptot_cache import schedule_reporte_aptot_cache_refresh
-# from app.modules.inventory.dashboard_establishment_stats_cache import (
-#     establishment_ids_for_conciliation_pair,
-#     establishment_ids_for_item_card,
-#     establishment_ids_for_margesi,
-#     schedule_dashboard_establishment_stats_refresh,
-# )
+from app.modules.inventory.dashboard_establishment_stats_cache import (
+    schedule_dashboard_stats_after_conciliation,
+    schedule_dashboard_stats_for_itemcard_only,
+    schedule_dashboard_stats_for_margesi_only,
+)
 from app.modules.inventory.schemas import (
     ConciliationFilters,
     ImportConciliationRow,
@@ -30,18 +29,35 @@ def _schedule_inventory_caches_refresh(
     *,
     marg: m.InvMargesiItem | None = None,
     bien: m.InvItemCard | None = None,
+    marg_inv_sit_before: str | None = None,
+    bien_inv_sit_before: str | None = None,
+    item_card_id: int | None = None,
 ) -> None:
     schedule_reporte_aptot_cache_refresh(tenant_id)
-    # Actualización automática del resumen dashboard deshabilitada (usar refresh manual).
-    # if marg is not None and bien is not None:
-    #     est_ids = establishment_ids_for_conciliation_pair(db, tenant_id, marg, bien)
-    # elif marg is not None:
-    #     est_ids = establishment_ids_for_margesi(db, tenant_id, marg)
-    # elif bien is not None:
-    #     est_ids = establishment_ids_for_item_card(db, tenant_id, bien)
-    # else:
-    #     est_ids = []
-    # schedule_dashboard_establishment_stats_refresh(tenant_id, est_ids)
+    if marg is not None and bien is not None:
+        schedule_dashboard_stats_after_conciliation(
+            db,
+            tenant_id,
+            marg=marg,
+            bien=bien,
+            marg_inv_sit_before=marg_inv_sit_before,
+            bien_inv_sit_before=bien_inv_sit_before,
+        )
+    elif marg is not None and marg_inv_sit_before is not None:
+        schedule_dashboard_stats_for_margesi_only(
+            db,
+            tenant_id,
+            marg=marg,
+            inv_sit_before=marg_inv_sit_before,
+        )
+    elif bien is not None and bien_inv_sit_before is not None and item_card_id is not None:
+        schedule_dashboard_stats_for_itemcard_only(
+            db,
+            tenant_id,
+            item=bien,
+            card_id=item_card_id,
+            inv_sit_before=bien_inv_sit_before,
+        )
 
 
 def _extra_dict(raw: Any) -> dict[str, Any]:
@@ -552,6 +568,9 @@ def conciliar_pair(
         if bien.inv_sit not in (None, "S"):
             return False, "El bien no está pendiente de conciliación (debe estar en situación S)."
 
+        marg_inv_sit_before = marg.inv_sit
+        bien_inv_sit_before = bien.inv_sit
+
         mar_num = _margesi_codigo_interno(marg)
         extra = dict(bien.extra or {})
         if mar_num:
@@ -571,7 +590,14 @@ def conciliar_pair(
         db.add(marg)
         db.add(bien)
         db.commit()
-        _schedule_inventory_caches_refresh(db, tenant_id, marg=marg, bien=bien)
+        _schedule_inventory_caches_refresh(
+            db,
+            tenant_id,
+            marg=marg,
+            bien=bien,
+            marg_inv_sit_before=marg_inv_sit_before,
+            bien_inv_sit_before=bien_inv_sit_before,
+        )
         return True, "Bienes conciliados"
     except Exception:  # noqa: BLE001
         db.rollback()
@@ -610,6 +636,9 @@ def conciliar_pair_sbn(
         if bien.inv_sit not in (None, "S"):
             return False, "El bien no está pendiente de conciliación."
 
+        marg_inv_sit_before = marg.inv_sit
+        bien_inv_sit_before = bien.inv_sit
+
         mar_num = _margesi_codigo_interno(marg)
         extra = dict(bien.extra or {})
         if mar_num:
@@ -633,7 +662,14 @@ def conciliar_pair_sbn(
         db.add(marg)
         db.add(bien)
         db.commit()
-        _schedule_inventory_caches_refresh(db, tenant_id, marg=marg, bien=bien)
+        _schedule_inventory_caches_refresh(
+            db,
+            tenant_id,
+            marg=marg,
+            bien=bien,
+            marg_inv_sit_before=marg_inv_sit_before,
+            bien_inv_sit_before=bien_inv_sit_before,
+        )
         return True, "Bienes conciliados (SBN)"
     except Exception:  # noqa: BLE001
         db.rollback()
@@ -652,6 +688,9 @@ def desconciliar_item(db: Session, tenant_id: UUID, item_id: int) -> tuple[bool,
         if not marg or marg.tenant_id != tenant_id:
             return False, "No se encontró el margesi."
 
+        marg_inv_sit_before = marg.inv_sit
+        bien_inv_sit_before = bien.inv_sit
+
         marg.inv_num = None
         marg.inv_sit = None
         marg.inv_con = None
@@ -668,7 +707,14 @@ def desconciliar_item(db: Session, tenant_id: UUID, item_id: int) -> tuple[bool,
         db.add(marg)
         db.add(bien)
         db.commit()
-        _schedule_inventory_caches_refresh(db, tenant_id, marg=marg, bien=bien)
+        _schedule_inventory_caches_refresh(
+            db,
+            tenant_id,
+            marg=marg,
+            bien=bien,
+            marg_inv_sit_before=marg_inv_sit_before,
+            bien_inv_sit_before=bien_inv_sit_before,
+        )
         return True, "Bienes desconciliados"
     except Exception:  # noqa: BLE001
         db.rollback()
@@ -694,6 +740,9 @@ def desconciliar_pair_sbn(
         if not marg or marg.tenant_id != tenant_id:
             return False, "No se encontró el margesi."
 
+        marg_inv_sit_before = marg.inv_sit
+        bien_inv_sit_before = bien.inv_sit
+
         marg.inv_num = None
         marg.inv_sit = None
         marg.inv_con = None
@@ -711,7 +760,14 @@ def desconciliar_pair_sbn(
         db.add(marg)
         db.add(bien)
         db.commit()
-        _schedule_inventory_caches_refresh(db, tenant_id, marg=marg, bien=bien)
+        _schedule_inventory_caches_refresh(
+            db,
+            tenant_id,
+            marg=marg,
+            bien=bien,
+            marg_inv_sit_before=marg_inv_sit_before,
+            bien_inv_sit_before=bien_inv_sit_before,
+        )
         return True, "Bienes desconciliados (SBN)"
     except Exception:  # noqa: BLE001
         db.rollback()
@@ -736,12 +792,16 @@ def mark_no_conciliable_entity(
     try:
         marg_row: m.InvMargesiItem | None = None
         bien_row: m.InvItemCard | None = None
+        marg_sit_before: str | None = None
+        bien_sit_before: str | None = None
+        item_card_id: int | None = None
         if tipo == "margesi":
             row = db.get(m.InvMargesiItem, entity_id)
             if not row or row.tenant_id != tenant_id:
                 return False, "No se encontró el margesi."
             if row.inv_num:
                 return False, "No se puede marcar: el margesi ya está conciliado."
+            marg_sit_before = row.inv_sit
             row.inv_sit = "N"
             _set_margesi_obs(row, observacion)
             db.add(row)
@@ -752,6 +812,8 @@ def mark_no_conciliable_entity(
                 return False, "No se encontró el bien."
             if row.id_margesi:
                 return False, "No se puede marcar: el bien ya está conciliado."
+            bien_sit_before = row.inv_sit
+            item_card_id = int(row.id_card)
             row.inv_sit = "N"
             _set_bien_obs(row, observacion)
             db.add(row)
@@ -759,7 +821,21 @@ def mark_no_conciliable_entity(
         else:
             return False, "Tipo de registro no válido."
         db.commit()
-        _schedule_inventory_caches_refresh(db, tenant_id, marg=marg_row, bien=bien_row)
+        if marg_row is not None and marg_sit_before is not None:
+            _schedule_inventory_caches_refresh(
+                db,
+                tenant_id,
+                marg=marg_row,
+                marg_inv_sit_before=marg_sit_before,
+            )
+        elif bien_row is not None and bien_sit_before is not None and item_card_id is not None:
+            _schedule_inventory_caches_refresh(
+                db,
+                tenant_id,
+                bien=bien_row,
+                bien_inv_sit_before=bien_sit_before,
+                item_card_id=item_card_id,
+            )
         return True, "Registro marcado como no conciliable"
     except Exception:  # noqa: BLE001
         db.rollback()
@@ -776,10 +852,14 @@ def mark_conciliable_entity(
     try:
         marg_row: m.InvMargesiItem | None = None
         bien_row: m.InvItemCard | None = None
+        marg_sit_before: str | None = None
+        bien_sit_before: str | None = None
+        item_card_id: int | None = None
         if tipo == "margesi":
             row = db.get(m.InvMargesiItem, entity_id)
             if not row or row.tenant_id != tenant_id:
                 return False, "No se encontró el margesi."
+            marg_sit_before = row.inv_sit
             row.inv_sit = None
             _set_margesi_obs(row, observacion)
             db.add(row)
@@ -790,6 +870,8 @@ def mark_conciliable_entity(
                 return False, "No se encontró el bien."
             if row.id_margesi:
                 return False, "No se puede habilitar: el bien ya está conciliado."
+            bien_sit_before = row.inv_sit
+            item_card_id = int(row.id_card)
             row.inv_sit = "S"
             _set_bien_obs(row, observacion)
             db.add(row)
@@ -797,7 +879,21 @@ def mark_conciliable_entity(
         else:
             return False, "Tipo de registro no válido."
         db.commit()
-        _schedule_inventory_caches_refresh(db, tenant_id, marg=marg_row, bien=bien_row)
+        if marg_row is not None and marg_sit_before is not None:
+            _schedule_inventory_caches_refresh(
+                db,
+                tenant_id,
+                marg=marg_row,
+                marg_inv_sit_before=marg_sit_before,
+            )
+        elif bien_row is not None and bien_sit_before is not None and item_card_id is not None:
+            _schedule_inventory_caches_refresh(
+                db,
+                tenant_id,
+                bien=bien_row,
+                bien_inv_sit_before=bien_sit_before,
+                item_card_id=item_card_id,
+            )
         return True, "Registro habilitado para conciliación"
     except Exception:  # noqa: BLE001
         db.rollback()

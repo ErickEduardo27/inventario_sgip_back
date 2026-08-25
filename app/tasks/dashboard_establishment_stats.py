@@ -12,6 +12,40 @@ from app.modules.inventory.dashboard_establishment_stats_cache import (
 )
 
 
+@celery_app.task(bind=True, name="dashboard.apply_establishment_stats_delta")
+def apply_dashboard_establishment_stats_delta_task(
+    self,
+    tenant_id: str,
+    changes_payload: list[dict] | None = None,
+    *,
+    deltas_payload: dict[str, dict[str, int]] | None = None,
+) -> dict:
+    from app.modules.inventory.dashboard_establishment_stats_incremental import (
+        EstablishmentStatsChange,
+        apply_establishment_deltas,
+        apply_establishment_stats_changes,
+    )
+
+    tenant_uuid = UUID(tenant_id)
+    with SessionLocal() as db:
+        try:
+            if deltas_payload:
+                normalized = {
+                    int(est_id): {k: int(v) for k, v in deltas.items()}
+                    for est_id, deltas in deltas_payload.items()
+                }
+                updated = apply_establishment_deltas(db, tenant_uuid, normalized)
+            elif changes_payload:
+                changes = [EstablishmentStatsChange.from_dict(raw) for raw in changes_payload]
+                updated = apply_establishment_stats_changes(db, tenant_uuid, changes)
+            else:
+                return {"success": False, "tenant_id": tenant_id, "message": "Sin payload"}
+            return {"success": True, "tenant_id": tenant_id, "updated": updated}
+        except Exception as exc:  # noqa: BLE001
+            db.rollback()
+            return {"success": False, "tenant_id": tenant_id, "message": str(exc)}
+
+
 @celery_app.task(bind=True, name="dashboard.refresh_establishment_stats")
 def refresh_dashboard_establishment_stats_task(
     self,

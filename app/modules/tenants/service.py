@@ -1,3 +1,5 @@
+from uuid import UUID
+
 from sqlalchemy.orm import Session
 
 from app.core.exceptions import AppError
@@ -15,4 +17,16 @@ class TenantService:
             raise AppError("Tenant no encontrado", 404)
         if t.status != "active":
             raise AppError("Tenant no disponible", 403)
+        return t
+
+    def update_name(self, tenant_id: UUID, name: str) -> Tenant:
+        t = self.repo.get_by_id(tenant_id)
+        if not t:
+            raise AppError("Tenant no encontrado", 404)
+        cleaned = name.strip()
+        if not cleaned:
+            raise AppError("El nombre es obligatorio", 400)
+        t.name = cleaned[:200]
+        self.repo.db.commit()
+        self.repo.db.refresh(t)
         return t

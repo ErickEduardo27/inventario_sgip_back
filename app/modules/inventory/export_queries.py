@@ -479,6 +479,12 @@ def build_reporte_aptot_locales_export_query(
 
 
 def build_cards_export_query(tenant_id: UUID, q: RecordQuery) -> tuple[str, tuple[Any, ...], str]:
+    where, params = _build_cards_list_where(tenant_id, q)
+    sql = f"{_CARDS_EXPORT_SELECT} WHERE {' AND '.join(where)} ORDER BY c.hoj_num, c.id"
+    return sql, tuple(params), "hoja_captura_export"
+
+
+def _build_cards_list_where(tenant_id: UUID, q: RecordQuery) -> tuple[list[str], list[Any]]:
     where = ["c.tenant_id = %s::uuid"]
     params: list[Any] = [str(tenant_id)]
 
@@ -519,8 +525,40 @@ def build_cards_export_query(tenant_id: UUID, q: RecordQuery) -> tuple[str, tupl
             where.append(f"c.{col} ILIKE %s")
             params.append(f"%{q.value}%")
 
-    sql = f"{_CARDS_EXPORT_SELECT} WHERE {' AND '.join(where)} ORDER BY c.hoj_num, c.id"
-    return sql, tuple(params), "hoja_captura_export"
+    return where, params
+
+
+_HOJA_CAPTURA_BIENES_EXPORT_SELECT = """
+        SELECT
+            c.hoj_num AS numero_hoja,
+            ic.inv_num AS numero_inventario,
+            COALESCE(ic.mar_des, m.mar_des, ic.extra->>'mar_des', '') AS descripcion,
+            COALESCE(m.mar_mar, ic.extra->>'mar_mar', '') AS marca,
+            COALESCE(m.mar_mod, ic.extra->>'mar_mod', '') AS modelo,
+            COALESCE(m.mar_ser, ic.extra->>'mar_ser', '') AS serie,
+            COALESCE(ic.mar_cpat, '') AS codigo_sbn,
+            COALESCE(ic.mar_num, '') AS codigo_interno,
+            COALESCE(m.mar_cont_val::text, NULLIF(ic.extra->>'mar_cont_val', ''), '') AS valor_contable,
+            COALESCE(m.mar_net_val::text, NULLIF(ic.extra->>'mar_net_val', ''), '') AS valor_neto,
+            COALESCE(est.code, '') AS codigo_local,
+            COALESCE(env.code, '') AS codigo_ambiente,
+            COALESCE(cc.code, '') AS codigo_centro_costo,
+            to_char(ic.created_at AT TIME ZONE 'America/Lima', 'DD/MM/YYYY HH24:MI') AS fecha_creacion
+        FROM itemcards ic
+        INNER JOIN cards c ON c.id = ic.id_card AND c.tenant_id = ic.tenant_id
+        LEFT JOIN margesi m ON m.id = ic.id_margesi AND m.tenant_id = ic.tenant_id
+        LEFT JOIN enviroments env ON env.id = c.id_ambiente AND env.tenant_id = c.tenant_id
+        LEFT JOIN establishments est ON est.id = env.establishment_id AND est.tenant_id = c.tenant_id
+        LEFT JOIN cost_center cc ON cc.id = c.id_ccosto AND cc.tenant_id = c.tenant_id
+"""
+
+
+def build_hoja_captura_bienes_export_query(tenant_id: UUID, q: RecordQuery) -> tuple[str, tuple[Any, ...], str]:
+    """Bienes de las hojas que coinciden con los mismos filtros del listado/export de hojas."""
+    where, params = _build_cards_list_where(tenant_id, q)
+    where[0] = "ic.tenant_id = %s::uuid"
+    sql = f"{_HOJA_CAPTURA_BIENES_EXPORT_SELECT} WHERE {' AND '.join(where)} ORDER BY c.hoj_num, ic.inv_num"
+    return sql, tuple(params), "hoja_captura_bienes_export"
 
 
 def build_margesi_export_query(

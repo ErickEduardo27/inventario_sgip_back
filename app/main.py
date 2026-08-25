@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import select
+from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
 from app.api.router import api_router
 from app.core.config import get_settings
@@ -29,6 +30,8 @@ def _cors_allow_origins() -> list[str]:
         "http://127.0.0.1:8080",
         "https://inventario-sgip.onrender.com",
         "https://www.inventario-sgip.onrender.com",
+        "https://inventarioqa.redbaron.click",
+        "https://www.inventarioqa.redbaron.click",
     ]
     if settings.frontend_url.strip():
         defaults.append(settings.frontend_url.strip().rstrip("/"))
@@ -92,6 +95,9 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="Inventario SGIP API", lifespan=lifespan)
+# Cloud Run termina TLS y reenvía HTTP al contenedor; sin esto los 307 de FastAPI
+# salen como Location: http://... y el navegador los bloquea (mixed-content).
+app.add_middleware(ProxyHeadersMiddleware, trusted_hosts="*")
 
 app.add_middleware(
     CORSMiddleware,

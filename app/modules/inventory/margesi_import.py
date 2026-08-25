@@ -204,6 +204,15 @@ def bulk_import_margesi(
     *,
     progress_cb=None,
 ) -> dict[str, Any]:
+    from app.modules.inventory.dashboard_establishment_stats_cache import (
+        flush_dashboard_stats_batch,
+    )
+    from app.modules.inventory.dashboard_establishment_stats_incremental import (
+        collect_margesi_null_mar_num_insert_deltas,
+        collect_margesi_staging_deltas,
+        dashboard_stats_batch,
+    )
+
     tenant_s = str(tenant_id)
     cols = _MARGESI_BULK_COLS
     cols_sql = ", ".join(cols)
@@ -223,52 +232,77 @@ def bulk_import_margesi(
 
         data_row_target = max(total_in_file - 1, 1)
 
-        for raw_chunk, file_total in _iter_margesi_data_chunks(content, filename):
-            saw_data = True
-            total_in_file = file_total
-            data_row_target = max(total_in_file - 1, 1)
-            chunk_rows = len(raw_chunk)
+        with dashboard_stats_batch() as stats_batch:
+            for raw_chunk, file_total in _iter_margesi_data_chunks(content, filename):
+                saw_data = True
+                total_in_file = file_total
+                data_row_target = max(total_in_file - 1, 1)
+                chunk_rows = len(raw_chunk)
 
-            staging = _map_chunk_to_staging(raw_chunk, cols)
-            upsert_df, null_df = _split_staging_for_load(staging)
+                staging = _map_chunk_to_staging(raw_chunk, cols)
+                upsert_df, null_df = _split_staging_for_load(staging)
 
-            if not upsert_df.empty:
-                truncate_staging(cur, _STAGING_TABLE)
-                copy_dataframe_csv(cur, table_name=_STAGING_TABLE, columns=cols, df=upsert_df)
-                _upsert_from_staging(
-                    cur,
-                    tenant_s=tenant_s,
-                    cols=cols,
-                    cols_sql=cols_sql,
-                    select_sql=select_sql,
-                    update_sql=update_sql,
-                )
+                if not upsert_df.empty:
+                    truncate_staging(cur, _STAGING_TABLE)
+                    copy_dataframe_csv(cur, table_name=_STAGING_TABLE, columns=cols, df=upsert_df)
+                    cur.execute("DROP TABLE IF EXISTS tmp_margesi_staging_stats_before")
+                    cur.execute(
+                        f"""
+                        CREATE TEMP TABLE tmp_margesi_staging_stats_before AS
+                        SELECT m.mar_num, m.inv_sit
+                        FROM margesi m
+                        INNER JOIN {_STAGING_TABLE} s
+                          ON m.tenant_id = %s::uuid
+                         AND NULLIF(TRIM(s.mar_num), '') IS NOT NULL
+                         AND m.mar_num = NULLIF(TRIM(s.mar_num), '')
+                        """,
+                        (tenant_s,),
+                    )
+                    _upsert_from_staging(
+                        cur,
+                        tenant_s=tenant_s,
+                        cols=cols,
+                        cols_sql=cols_sql,
+                        select_sql=select_sql,
+                        update_sql=update_sql,
+                    )
+                    stats_batch.merge_deltas(collect_margesi_staging_deltas(db, tenant_id))
 
-            if not null_df.empty:
-                truncate_staging(cur, _STAGING_TABLE)
-                copy_dataframe_csv(cur, table_name=_STAGING_TABLE, columns=cols, df=null_df)
-                _insert_without_mar_num_from_staging(
-                    cur,
-                    tenant_s=tenant_s,
-                    cols_sql=cols_sql,
-                    select_sql=select_sql,
-                )
+                if not null_df.empty:
+                    truncate_staging(cur, _STAGING_TABLE)
+                    copy_dataframe_csv(cur, table_name=_STAGING_TABLE, columns=cols, df=null_df)
+                    _insert_without_mar_num_from_staging(
+                        cur,
+                        tenant_s=tenant_s,
+                        cols_sql=cols_sql,
+                        select_sql=select_sql,
+                    )
+                    amb_codes = null_df["amb_cod"].astype(str).tolist() if "amb_cod" in null_df.columns else []
+                    stats_batch.merge_deltas(
+                        collect_margesi_null_mar_num_insert_deltas(
+                            db,
+                            tenant_id,
+                            row_count=len(null_df),
+                            amb_codes=amb_codes,
+                        ),
+                    )
 
-            registered += chunk_rows
-            if progress_cb:
-                pct = min(99, int(registered * 100 / data_row_target))
-                progress_cb(pct, data_row_target, 0, registered)
+                registered += chunk_rows
+                if progress_cb:
+                    pct = min(99, int(registered * 100 / data_row_target))
+                    progress_cb(pct, data_row_target, 0, registered)
 
-        if not saw_data:
-            return {
-                "success": False,
-                "message": "No hay filas para importar",
-                "total": total_in_file,
-                "registered": 0,
-                "errors": ["Archivo sin filas de datos"],
-            }
+            if not saw_data:
+                return {
+                    "success": False,
+                    "message": "No hay filas para importar",
+                    "total": total_in_file,
+                    "registered": 0,
+                    "errors": ["Archivo sin filas de datos"],
+                }
 
-        db.commit()
+            db.commit()
+            flush_dashboard_stats_batch(tenant_id, stats_batch)
         if progress_cb:
             progress_cb(100, data_row_target, 0, registered)
 

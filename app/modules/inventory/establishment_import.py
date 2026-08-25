@@ -332,8 +332,12 @@ def bulk_import_establishments(
         inserted = cur.rowcount or 0
         db.commit()
         from app.modules.inventory.reporte_locales_service import backfill_missing_reporte_locales
+        from app.modules.inventory.dashboard_establishment_stats_incremental import (
+            ensure_stats_rows_for_establishments_without_cache,
+        )
 
         backfill_missing_reporte_locales(db, tenant_id)
+        ensure_stats_rows_for_establishments_without_cache(db, tenant_id)
         if progress_cb:
             progress_cb(100, len(rows), updated, inserted)
 

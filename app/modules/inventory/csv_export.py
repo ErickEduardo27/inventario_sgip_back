@@ -63,14 +63,9 @@ def _sanitize_excel_value(value: object) -> object:
 
 def csv_bytes_to_xlsx_bytes(csv_payload: bytes) -> bytes:
     """Convierte CSV UTF-8 (con o sin BOM) a libro Excel (.xlsx)."""
-    import pandas as pd
+    from app.modules.inventory.excel_styled_export import csv_bytes_to_styled_xlsx_bytes
 
-    text = csv_payload.decode("utf-8-sig", errors="replace")
-    df = pd.read_csv(io.StringIO(text))
-    df = df.map(_sanitize_excel_value)
-    out = io.BytesIO()
-    df.to_excel(out, index=False, engine="openpyxl")
-    return out.getvalue()
+    return csv_bytes_to_styled_xlsx_bytes(csv_payload, sheet_title="Exportación")
 
 
 def csv_download_response(

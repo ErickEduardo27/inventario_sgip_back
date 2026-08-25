@@ -292,6 +292,8 @@ class InventoryMonthlyCount(BaseModel):
 class InventoryDashboardKpis(BaseModel):
     bienes_total: int
     margesi_total: int
+    bienes_prev_total: int = 0
+    margesi_pendientes: int = 0
 
 
 class InventoryUserRegistrationStat(BaseModel):

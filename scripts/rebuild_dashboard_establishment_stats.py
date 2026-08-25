@@ -40,11 +40,22 @@ def _rebuild(tenant_id: UUID) -> None:
         print(result)
 
 
+def _rebuild_all() -> None:
+    with SessionLocal() as db:
+        tenant_ids = [t.id for t in db.query(Tenant).order_by(Tenant.name).all()]
+    if not tenant_ids:
+        print("No hay tenants en la base.")
+        return
+    for tenant_id in tenant_ids:
+        print(f"Reconstruyendo tenant {tenant_id}…")
+        _rebuild(tenant_id)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Poblar/actualizar dashboard_establishment_stats por tenant.",
     )
-    parser.add_argument("--tenant-id", type=str, help="UUID del tenant")
+    parser.add_argument("--tenant-id", type=str, help="UUID del tenant (si se omite, reconstruye todos)")
     parser.add_argument("--list-tenants", action="store_true", help="Listar tenants")
     args = parser.parse_args()
 
@@ -52,10 +63,11 @@ def main() -> None:
         _list_tenants()
         return
 
-    if not args.tenant_id:
-        parser.error("Indique --tenant-id o use --list-tenants")
+    if args.tenant_id:
+        _rebuild(UUID(args.tenant_id))
+        return
 
-    _rebuild(UUID(args.tenant_id))
+    _rebuild_all()
 
 
 if __name__ == "__main__":

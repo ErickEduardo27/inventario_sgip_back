@@ -19,10 +19,17 @@ def _ext_for_mime(mime: str) -> str:
     return "jpg" if m == "image/jpeg" else "png"
 
 
-def build_logo_object_key(*, tenant_id: UUID, ext: str) -> str:
+LogoKind = str  # "portal" | "pdf"
+
+
+def _logo_stem(kind: LogoKind = "portal") -> str:
+    return "logo-pdf" if kind == "pdf" else "logo"
+
+
+def build_logo_object_key(*, tenant_id: UUID, ext: str, kind: LogoKind = "portal") -> str:
     settings = get_settings()
     prefix = (settings.gcs_logos_prefix or "tenant-logos").strip("/") or "tenant-logos"
-    return f"{prefix}/{tenant_id}/logo.{ext}"
+    return f"{prefix}/{tenant_id}/{_logo_stem(kind)}.{ext}"
 
 
 def _gcs_client():
@@ -46,17 +53,18 @@ def _local_public_url(tenant_id: UUID, filename: str) -> str:
     return f"{base}{path}" if base else path
 
 
-def upload_tenant_logo(*, tenant_id: UUID, content: bytes, content_type: str) -> str:
+def upload_tenant_logo(*, tenant_id: UUID, content: bytes, content_type: str, kind: LogoKind = "portal") -> str:
     if len(content) > MAX_LOGO_BYTES:
         raise ValueError("El logo no debe superar 2 MB")
     mime = (content_type or "").lower().split(";")[0].strip()
     if mime not in ALLOWED_LOGO_MIMES:
         raise ValueError("Formato no permitido. Use PNG o JPEG.")
     ext = _ext_for_mime(mime)
+    stem = _logo_stem(kind)
 
     settings = get_settings()
     if settings.gcs_bucket:
-        object_key = build_logo_object_key(tenant_id=tenant_id, ext=ext)
+        object_key = build_logo_object_key(tenant_id=tenant_id, ext=ext, kind=kind)
         client = _gcs_client()
         blob = client.bucket(settings.gcs_bucket).blob(object_key)
         blob.upload_from_string(content, content_type=mime)
@@ -64,11 +72,19 @@ def upload_tenant_logo(*, tenant_id: UUID, content: bytes, content_type: str) ->
 
     base = Path(__file__).resolve().parents[2] / "uploads" / "tenant-logos" / str(tenant_id)
     base.mkdir(parents=True, exist_ok=True)
-    for old in base.glob("logo.*"):
+    for old in base.glob(f"{stem}.*"):
         old.unlink(missing_ok=True)
-    filename = f"logo.{ext}"
+    filename = f"{stem}.{ext}"
     (base / filename).write_bytes(content)
     return _local_public_url(tenant_id, filename)
+
+
+def _mime_from_bytes(content: bytes) -> str:
+    if content[:3] == b"\xff\xd8\xff":
+        return "image/jpeg"
+    if content[:8] == b"\x89PNG\r\n\x1a\n":
+        return "image/png"
+    return "image/png"
 
 
 def read_local_tenant_logo(tenant_id: UUID, filename: str) -> tuple[bytes, str] | None:
@@ -80,6 +96,28 @@ def read_local_tenant_logo(tenant_id: UUID, filename: str) -> tuple[bytes, str] 
         return None
     mime, _ = mimetypes.guess_type(safe)
     return path.read_bytes(), (mime or "image/png").split(";")[0].strip() or "image/png"
+
+
+def read_stored_logo_file(tenant_id: UUID, filename: str) -> tuple[bytes, str] | None:
+    """Disco local o GCS (bucket privado). Para miniaturas y login."""
+    pack = read_local_tenant_logo(tenant_id, filename)
+    if pack:
+        return pack
+    settings = get_settings()
+    if not settings.gcs_bucket:
+        return None
+    safe = Path(filename).name
+    if safe != filename or ".." in filename:
+        return None
+    prefix = (settings.gcs_logos_prefix or "tenant-logos").strip("/") or "tenant-logos"
+    key = f"{prefix}/{tenant_id}/{safe}"
+    try:
+        data = _gcs_client().bucket(settings.gcs_bucket).blob(key).download_as_bytes()
+    except Exception:
+        return None
+    if not data:
+        return None
+    return data, _mime_from_bytes(data)
 
 
 def _parse_gcs_url(url: str) -> tuple[str, str] | None:

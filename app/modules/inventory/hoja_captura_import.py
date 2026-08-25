@@ -193,92 +193,101 @@ def bulk_import_hoja_captura_items(
     data_row_target = 1
     saw_data = False
 
+    from app.modules.inventory.dashboard_establishment_stats_cache import (
+        flush_dashboard_stats_batch,
+    )
+    from app.modules.inventory.dashboard_establishment_stats_incremental import (
+        dashboard_stats_batch,
+    )
+
     try:
-        for chunk, file_total in _iter_data_chunks(content, filename):
-            saw_data = True
-            total_in_file = file_total
-            data_row_target = max(total_in_file - 1, 1)
+        with dashboard_stats_batch() as stats_batch:
+            for chunk, file_total in _iter_data_chunks(content, filename):
+                saw_data = True
+                total_in_file = file_total
+                data_row_target = max(total_in_file - 1, 1)
 
-            for _, row in chunk.iterrows():
-                hoj_num = _normalize_hoj_num(_cell_str(row.get(0)))
-                body = _row_to_body(row)
-                if body is None:
-                    skipped += 1
-                    continue
+                for _, row in chunk.iterrows():
+                    hoj_num = _normalize_hoj_num(_cell_str(row.get(0)))
+                    body = _row_to_body(row)
+                    if body is None:
+                        skipped += 1
+                        continue
 
-                card = cards.get(hoj_num)
-                if card is None:
-                    errors.append(f"Hoja {hoj_num} no encontrada")
-                    if len(errors) >= 200:
-                        break
-                    skipped += 1
-                    continue
-                if int(card.state or 0) == 2:
-                    errors.append(f"Hoja {hoj_num} cerrada; fila omitida (inv {body.inv_num})")
-                    if len(errors) >= 200:
-                        break
-                    skipped += 1
-                    continue
-
-                existing = inv_index.get(body.inv_num) if body.inv_num is not None else None
-                if existing is not None:
-                    if int(existing.id_card) != int(card.id):
-                        errors.append(
-                            f"N° inventario {body.inv_num} ya existe en otra hoja (fila hoj {hoj_num})"
-                        )
+                    card = cards.get(hoj_num)
+                    if card is None:
+                        errors.append(f"Hoja {hoj_num} no encontrada")
                         if len(errors) >= 200:
                             break
                         skipped += 1
                         continue
-                    body.id = int(existing.id)
+                    if int(card.state or 0) == 2:
+                        errors.append(f"Hoja {hoj_num} cerrada; fila omitida (inv {body.inv_num})")
+                        if len(errors) >= 200:
+                            break
+                        skipped += 1
+                        continue
 
-                ok, msg = store_card_item(
-                    db,
-                    tenant_id,
-                    int(card.id),
-                    body,
-                    operator_id=operator_id if not body.id else None,
-                )
-                if not ok:
-                    errors.append(f"Hoja {hoj_num} / {body.inv_num}: {msg}")
-                    if len(errors) >= 200:
-                        break
-                    skipped += 1
-                    continue
-
-                registered += 1
-                if body.id:
-                    updated += 1
-                else:
-                    inserted += 1
-                    inv_key = body.inv_num
-                    if inv_key is not None:
-                        fresh = db.scalar(
-                            select(m.InvItemCard).where(
-                                m.InvItemCard.tenant_id == tenant_id,
-                                m.InvItemCard.inv_num == inv_key,
+                    existing = inv_index.get(body.inv_num) if body.inv_num is not None else None
+                    if existing is not None:
+                        if int(existing.id_card) != int(card.id):
+                            errors.append(
+                                f"N° inventario {body.inv_num} ya existe en otra hoja (fila hoj {hoj_num})"
                             )
-                        )
-                        if fresh is not None:
-                            inv_index[inv_key] = fresh
+                            if len(errors) >= 200:
+                                break
+                            skipped += 1
+                            continue
+                        body.id = int(existing.id)
 
-            if progress_cb:
-                pct = min(99, int(registered * 100 / max(data_row_target, 1)))
-                progress_cb(pct, data_row_target, updated, inserted)
+                    ok, msg = store_card_item(
+                        db,
+                        tenant_id,
+                        int(card.id),
+                        body,
+                        operator_id=operator_id if not body.id else None,
+                    )
+                    if not ok:
+                        errors.append(f"Hoja {hoj_num} / {body.inv_num}: {msg}")
+                        if len(errors) >= 200:
+                            break
+                        skipped += 1
+                        continue
 
-        if not saw_data:
-            return {
-                "success": False,
-                "message": "No hay filas para importar",
-                "total": total_in_file,
-                "registered": 0,
-                "inserted": 0,
-                "updated": 0,
-                "errors": ["Archivo sin filas de datos"],
-            }
+                    registered += 1
+                    if body.id:
+                        updated += 1
+                    else:
+                        inserted += 1
+                        inv_key = body.inv_num
+                        if inv_key is not None:
+                            fresh = db.scalar(
+                                select(m.InvItemCard).where(
+                                    m.InvItemCard.tenant_id == tenant_id,
+                                    m.InvItemCard.inv_num == inv_key,
+                                )
+                            )
+                            if fresh is not None:
+                                inv_index[inv_key] = fresh
 
-        recount_card_items(db, tenant_id)
-        db.commit()
+                if progress_cb:
+                    pct = min(99, int(registered * 100 / max(data_row_target, 1)))
+                    progress_cb(pct, data_row_target, updated, inserted)
+
+            if not saw_data:
+                return {
+                    "success": False,
+                    "message": "No hay filas para importar",
+                    "total": total_in_file,
+                    "registered": 0,
+                    "inserted": 0,
+                    "updated": 0,
+                    "errors": ["Archivo sin filas de datos"],
+                }
+
+            recount_card_items(db, tenant_id)
+            db.commit()
+            flush_dashboard_stats_batch(tenant_id, stats_batch)
 
         if progress_cb:
             progress_cb(100, data_row_target, updated, inserted)

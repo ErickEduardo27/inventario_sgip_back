@@ -22,9 +22,12 @@ class WorkspaceSettings(Base, UUIDPKMixin, TenantMixin, TimestampMixin):
     currency: Mapped[str] = mapped_column(String(10), nullable=False, default="PEN")
     timezone: Mapped[str] = mapped_column(String(80), nullable=False, default="America/Lima")
     logo_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    pdf_logo_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
 
     google_cloud_info: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     alerts_config: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     portal_branding: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    feature_flags: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    custom_components: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
 
     integration_notes: Mapped[str | None] = mapped_column(Text, nullable=True)

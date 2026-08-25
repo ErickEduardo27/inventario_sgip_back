@@ -1,7 +1,11 @@
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class TenantNameUpdate(BaseModel):
+    name: str = Field(..., min_length=1, max_length=200)
 
 
 class TenantPublicOut(BaseModel):

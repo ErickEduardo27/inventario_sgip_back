@@ -213,6 +213,75 @@ def establishment_ids_for_conciliation_pair(
     return sorted(ids)
 
 
+def schedule_dashboard_establishment_stats_deltas(
+    tenant_id: UUID,
+    deltas_by_establishment: dict[int, dict[str, int]],
+    *,
+    countdown: int = 1,
+) -> None:
+    """Encola deltas ya sumados (ideal tras imports masivos)."""
+    from app.modules.inventory.dashboard_establishment_stats_incremental import (
+        get_dashboard_stats_batch,
+    )
+
+    if not deltas_by_establishment or not any(any(d.values()) for d in deltas_by_establishment.values()):
+        return
+
+    batch = get_dashboard_stats_batch()
+    if batch is not None:
+        batch.merge_deltas(deltas_by_establishment)
+        return
+
+    payload = {str(est_id): dict(deltas) for est_id, deltas in deltas_by_establishment.items()}
+    try:
+        from app.tasks.dashboard_establishment_stats import (
+            apply_dashboard_establishment_stats_delta_task,
+        )
+
+        apply_dashboard_establishment_stats_delta_task.apply_async(
+            kwargs={"tenant_id": str(tenant_id), "deltas_payload": payload},
+            countdown=countdown,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("No se pudo encolar deltas dashboard stats: %s", exc)
+
+
+def flush_dashboard_stats_batch(tenant_id: UUID, collector: Any) -> None:
+    """Envía a Celery los deltas acumulados en un import masivo."""
+    if collector is None or collector.is_empty():
+        return
+    schedule_dashboard_establishment_stats_deltas(tenant_id, collector.merged_deltas(), countdown=0)
+
+
+def schedule_dashboard_establishment_stats_incremental(
+    tenant_id: UUID,
+    changes: list[Any],
+    *,
+    countdown: int = 1,
+) -> None:
+    """Encola deltas incrementales (UPDATE +=) en Celery; no recalcula COUNT del local."""
+    from app.modules.inventory.dashboard_establishment_stats_incremental import (
+        EstablishmentStatsChange,
+        get_dashboard_stats_batch,
+        merge_establishment_changes,
+    )
+
+    if not changes:
+        return
+
+    parsed = [
+        c if isinstance(c, EstablishmentStatsChange) else EstablishmentStatsChange.from_dict(c)
+        for c in changes
+    ]
+    batch = get_dashboard_stats_batch()
+    if batch is not None:
+        batch.add_changes(parsed)
+        return
+
+    deltas = merge_establishment_changes(parsed)
+    schedule_dashboard_establishment_stats_deltas(tenant_id, deltas, countdown=countdown)
+
+
 def schedule_dashboard_establishment_stats_refresh(
     tenant_id: UUID,
     establishment_ids: Iterable[int],
@@ -264,11 +333,18 @@ def schedule_dashboard_stats_after_card_item_change(
     tenant_id: UUID,
     *,
     card_id: int,
-    margesi_row: m.InvMargesiItem | None = None,
+    changes: list[Any],
 ) -> None:
-    ids = set(establishment_ids_for_card(db, tenant_id, card_id))
-    if margesi_row is not None:
-        ids.update(establishment_ids_for_margesi(db, tenant_id, margesi_row))
+    """Aplica deltas incrementales para el local de la hoja (+ opcional segundo local Margesi)."""
+    from app.modules.inventory.dashboard_establishment_stats_incremental import (
+        EstablishmentStatsChange,
+    )
+
+    if changes:
+        schedule_dashboard_establishment_stats_incremental(tenant_id, changes)
+        return
+    # Fallback: recalcular local si no se pasaron transiciones explícitas.
+    ids = establishment_ids_for_card(db, tenant_id, card_id)
     schedule_dashboard_establishment_stats_refresh(tenant_id, ids)
 
 
@@ -278,15 +354,116 @@ def schedule_dashboard_stats_after_item_move(
     *,
     old_card_id: int,
     new_card_id: int,
+    item_inv_sit: str | None,
 ) -> None:
-    ids = set(establishment_ids_for_card(db, tenant_id, old_card_id))
-    ids.update(establishment_ids_for_card(db, tenant_id, new_card_id))
-    schedule_dashboard_establishment_stats_refresh(tenant_id, ids)
+    from app.modules.inventory.dashboard_establishment_stats_incremental import (
+        change_for_establishment,
+        itemcard_create_transition,
+        itemcard_delete_transition,
+    )
+
+    old_ids = establishment_ids_for_card(db, tenant_id, old_card_id)
+    new_ids = establishment_ids_for_card(db, tenant_id, new_card_id)
+    if not old_ids or not new_ids:
+        schedule_dashboard_establishment_stats_refresh(
+            tenant_id,
+            set(old_ids) | set(new_ids),
+        )
+        return
+    old_est, new_est = old_ids[0], new_ids[0]
+    if old_est == new_est:
+        return
+    changes = [
+        change_for_establishment(old_est, itemcard_delete_transition(item_inv_sit)),
+        change_for_establishment(new_est, itemcard_create_transition(item_inv_sit)),
+    ]
+    schedule_dashboard_establishment_stats_incremental(tenant_id, changes)
+
+
+def schedule_dashboard_stats_after_conciliation(
+    db: Session,
+    tenant_id: UUID,
+    *,
+    marg: m.InvMargesiItem,
+    bien: m.InvItemCard,
+    marg_inv_sit_before: str | None,
+    bien_inv_sit_before: str | None,
+) -> None:
+    from collections import defaultdict
+
+    from app.modules.inventory.dashboard_establishment_stats_incremental import (
+        EntityTransition,
+        change_for_establishment,
+        itemcard_update_transition,
+        margesi_update_transition,
+    )
+
+    marg_tr = margesi_update_transition(marg_inv_sit_before, marg.inv_sit)
+    item_tr = itemcard_update_transition(bien_inv_sit_before, bien.inv_sit)
+    by_est: dict[int, list[EntityTransition]] = defaultdict(list)
+
+    for est_id in establishment_ids_for_margesi(db, tenant_id, marg):
+        by_est[int(est_id)].append(marg_tr)
+    for est_id in establishment_ids_for_item_card(db, tenant_id, bien):
+        by_est[int(est_id)].append(item_tr)
+
+    if not by_est:
+        return
+    changes = [
+        change_for_establishment(est_id, *transitions)
+        for est_id, transitions in by_est.items()
+    ]
+    schedule_dashboard_establishment_stats_incremental(tenant_id, changes)
+
+
+def schedule_dashboard_stats_for_margesi_only(
+    db: Session,
+    tenant_id: UUID,
+    *,
+    marg: m.InvMargesiItem,
+    inv_sit_before: str | None,
+) -> None:
+    from app.modules.inventory.dashboard_establishment_stats_incremental import (
+        change_for_establishment,
+        margesi_update_transition,
+    )
+
+    est_ids = establishment_ids_for_margesi(db, tenant_id, marg)
+    if not est_ids:
+        return
+    tr = margesi_update_transition(inv_sit_before, marg.inv_sit)
+    schedule_dashboard_establishment_stats_incremental(
+        tenant_id,
+        [change_for_establishment(est_ids[0], tr)],
+    )
+
+
+def schedule_dashboard_stats_for_itemcard_only(
+    db: Session,
+    tenant_id: UUID,
+    *,
+    item: m.InvItemCard,
+    card_id: int,
+    inv_sit_before: str | None,
+) -> None:
+    from app.modules.inventory.dashboard_establishment_stats_incremental import (
+        change_for_establishment,
+        itemcard_update_transition,
+    )
+
+    est_ids = establishment_ids_for_card(db, tenant_id, card_id)
+    if not est_ids:
+        return
+    tr = itemcard_update_transition(inv_sit_before, item.inv_sit)
+    schedule_dashboard_establishment_stats_incremental(
+        tenant_id,
+        [change_for_establishment(est_ids[0], tr)],
+    )
 
 
 def maybe_schedule_dashboard_stats_after_import(module: str, tenant_id: UUID) -> None:
-    if module in DASHBOARD_STATS_IMPORT_MODULES:
-        schedule_dashboard_establishment_stats_tenant_refresh(tenant_id)
+    """Legacy: los imports encolan deltas incrementales por su cuenta."""
+    _ = (module, tenant_id)
 
 
 def dashboard_establishment_stats_cache_count(db: Session, tenant_id: UUID) -> int:

@@ -272,3 +272,89 @@ def export_item_cards_csv_task(
                 dl_svc.mark_failure(db, row, message=str(exc)[:500])
                 db.commit()
         return {"success": False, "job_id": job_id, "message": str(exc)}
+
+
+@celery_app.task(bind=True, name="export.hoja_captura")
+def export_hoja_captura_task(
+    self,
+    job_id: str,
+    tenant_id: str,
+    query_dict: dict,
+) -> dict:
+    job_uuid = UUID(job_id)
+    tenant_uuid = UUID(tenant_id)
+    q = RecordQuery.model_validate(query_dict)
+
+    try:
+        with SessionLocal() as db:
+            row = dl_svc.get_descarga_archivo(db, job_uuid, tenant_uuid)
+            if row is None:
+                return {"success": False, "message": "Trabajo de descarga no encontrado"}
+            dl_svc.mark_processing(db, row, message="Generando Excel…")
+            db.commit()
+
+        self.update_state(state="PROGRESS", meta=_progress_meta(25, "Generando Excel…"))
+        with SessionLocal() as db:
+            row = dl_svc.get_descarga_archivo(db, job_uuid, tenant_uuid)
+            if row is not None:
+                dl_svc.update_progress(db, row, progress=40, message="Generando Excel…")
+                db.commit()
+
+        self.update_state(state="PROGRESS", meta=_progress_meta(55, "Generando Excel…"))
+        from app.modules.inventory.hoja_captura_export import build_hoja_captura_xlsx_bytes
+
+        content, filename = build_hoja_captura_xlsx_bytes(tenant_uuid, q)
+
+        with SessionLocal() as db:
+            row = dl_svc.get_descarga_archivo(db, job_uuid, tenant_uuid)
+            if row is not None:
+                dl_svc.update_progress(db, row, progress=70, message="Subiendo archivo…")
+                db.commit()
+
+        self.update_state(
+            state="PROGRESS",
+            meta=_progress_meta(75, f"Subiendo a almacenamiento ({len(content) / 1024 / 1024:.1f} MB)…"),
+        )
+
+        gcs_path = upload_export_file(
+            module="hoja_captura",
+            tenant_id=tenant_uuid,
+            job_id=job_uuid,
+            filename=filename,
+            content=content,
+        )
+        download_url, expires_at = resolve_download_url(
+            storage_path=gcs_path,
+            filename=filename,
+            job_id=job_uuid,
+        )
+
+        with SessionLocal() as db:
+            row = dl_svc.get_descarga_archivo(db, job_uuid, tenant_uuid)
+            if row is None:
+                return {"success": False, "message": "Trabajo de descarga no encontrado"}
+            dl_svc.mark_success(
+                db,
+                row,
+                gcs_path=gcs_path,
+                download_url=download_url,
+                file_size_bytes=len(content),
+                expires_at=expires_at,
+                message="Tu archivo Excel está listo para descargar",
+            )
+            db.commit()
+
+        return {
+            "success": True,
+            "job_id": job_id,
+            "filename": filename,
+            "file_size_bytes": len(content),
+            "download_url": download_url,
+        }
+    except Exception as exc:  # noqa: BLE001
+        with SessionLocal() as db:
+            row = dl_svc.get_descarga_archivo(db, job_uuid, tenant_uuid)
+            if row is not None:
+                dl_svc.mark_failure(db, row, message=str(exc)[:500])
+                db.commit()
+        return {"success": False, "job_id": job_id, "message": str(exc)}

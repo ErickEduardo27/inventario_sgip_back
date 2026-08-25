@@ -12,6 +12,7 @@ from app.api.deps import get_current_user, get_tenant_id
 from app.db.session import get_db
 from app.modules.iam.models import User
 from app.modules.iam.service import ComponentService
+from app.modules.tenants.features import is_feature_enabled
 
 PermissionAction = Literal["view", "create", "edit", "delete", "export"]
 
@@ -33,6 +34,8 @@ def require_permission(code: str, action: PermissionAction = "view"):
         db: Session = Depends(get_db),
         tenant_id: UUID = Depends(get_tenant_id),
     ) -> User:
+        if not is_feature_enabled(db, tenant_id, code):
+            raise HTTPException(status_code=403, detail="Módulo no habilitado para este tenant")
         if not _has_action(user, db, tenant_id, code, action):
             raise HTTPException(status_code=403, detail="No tiene permiso para esta acción")
         return user
@@ -49,9 +52,14 @@ def require_any_permission(*codes: str, action: PermissionAction = "view"):
         tenant_id: UUID = Depends(get_tenant_id),
     ) -> User:
         if user.is_superadmin:
-            return user
+            for code in codes:
+                if is_feature_enabled(db, tenant_id, code):
+                    return user
+            raise HTTPException(status_code=403, detail="Módulo no habilitado para este tenant")
         svc = ComponentService(db)
         for code in codes:
+            if not is_feature_enabled(db, tenant_id, code):
+                continue
             perms = svc.resolve_permission(tenant_id, user.id, code)
             if perms and getattr(perms, action):
                 return user
