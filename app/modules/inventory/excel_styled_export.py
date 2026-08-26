@@ -29,6 +29,16 @@ HOJA_CAPTURA_COLUMN_FORMATS: dict[str, ColumnFormat] = {
     "numero_hoja": "integer",
     "fecha": "date",
     "fecha_creacion": "datetime",
+    "cantidad_total": "integer",
+    "total_bienes": "integer",
+    "conciliados": "integer",
+    "sobrantes": "integer",
+}
+
+# Perfil: bienes inventariados (itemcards)
+BIENES_INVENTARIADOS_COLUMN_FORMATS: dict[str, ColumnFormat] = {
+    "id_bien": "integer",
+    "fecha_creacion": "datetime",
 }
 
 _DEFAULT_HEADER_COLOR = "2474F5"

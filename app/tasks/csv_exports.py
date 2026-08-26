@@ -217,14 +217,15 @@ def export_item_cards_csv_task(
 
         inner_sql, params, filename_base = build_item_cards_export_query(tenant_uuid, q)
         stamp = date.today().isoformat()
-        ext = "xlsx" if fmt == "xlsx" else "csv"
-        filename = f"{filename_base}_{stamp}.{ext}"
-        payload = copy_query_to_csv_bytes(inner_sql, params)
         if fmt == "xlsx":
-            self.update_state(state="PROGRESS", meta=_progress_meta(45, "Convirtiendo a Excel…"))
-            content = csv_bytes_to_xlsx_bytes(payload)
+            self.update_state(state="PROGRESS", meta=_progress_meta(45, "Generando Excel…"))
+            from app.modules.inventory.bienes_inventariados_export import build_bienes_inventariados_xlsx_bytes
+
+            content, filename = build_bienes_inventariados_xlsx_bytes(tenant_uuid, q)
         else:
+            payload = copy_query_to_csv_bytes(inner_sql, params)
             content = b"\xef\xbb\xbf" + payload
+            filename = f"{filename_base}_{stamp}.csv"
 
         self.update_state(
             state="PROGRESS",

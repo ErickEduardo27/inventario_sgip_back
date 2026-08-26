@@ -835,10 +835,10 @@ def _card_summary_for_inv_hoj(db: Session, tenant_id: UUID, inv_hoj: str | None)
         return None
     hoj_n = try_parse_inventory_number(hoj)
     if hoj_n is None:
-        return {"hoj_num": hoj, "local": None, "ambiente": None}
+        return {"hoj_num": hoj, "local": None, "ambiente": None, "usuario": None}
     card = db.scalar(select(m.InvCard).where(m.InvCard.tenant_id == tenant_id, m.InvCard.hoj_num == hoj_n))
     if not card:
-        return {"hoj_num": hoj, "local": None, "ambiente": None}
+        return {"hoj_num": hoj, "local": None, "ambiente": None, "usuario": None}
     ambiente = db.get(m.InvEnvironment, card.id_ambiente) if card.id_ambiente else None
     local_desc = None
     if ambiente and ambiente.establishment_id:
@@ -848,7 +848,17 @@ def _card_summary_for_inv_hoj(db: Session, tenant_id: UUID, inv_hoj: str | None)
     amb_desc = None
     if ambiente:
         amb_desc = f"{ambiente.code} - {ambiente.description or ''}".strip(" -")
-    return {"hoj_num": hoj, "local": local_desc, "ambiente": amb_desc}
+    usuario_desc = None
+    if card.id_usuario:
+        pers = db.get(m.InvPerson, card.id_usuario)
+        if pers:
+            num = (pers.number or "").strip()
+            name = (pers.name or "").strip()
+            if num and name:
+                usuario_desc = f"{num} - {name}"
+            else:
+                usuario_desc = num or name or None
+    return {"hoj_num": hoj, "local": local_desc, "ambiente": amb_desc, "usuario": usuario_desc}
 
 
 def record_margesi_cod(
@@ -881,6 +891,7 @@ def record_margesi_cod(
             "hoj_num": inv_hoj,
             "local": None,
             "ambiente": None,
+            "usuario": None,
         }
         inv_raw = row.inv_num
         if inv_raw is not None and str(inv_raw).strip():
@@ -907,6 +918,11 @@ def record_margesi_cod(
         "id_margesi": row.id,
         "inv_num_sugerido": inv_sugerido,
         "item": _margesi_to_lookup_item(row),
+        "card_info": {
+            "local": (row.local_libre or "").strip() or None,
+            "usuario": (row.usuario_libre or "").strip() or None,
+            "ambiente": (row.ambiente_libre or "").strip() or None,
+        },
     }
 
 
@@ -2043,6 +2059,8 @@ SELECT
     ic.id AS itemcard_id,
     ic.id_card AS card_id,
     ic.inv_num,
+    ic.mar_num,
+    ic.inv_num_2,
     ic.mar_cpat,
     ic.mar_des,
     ic.inv_sit,
@@ -2153,6 +2171,8 @@ def list_item_photos(db: Session, tenant_id: UUID, q: ItemPhotoQuery) -> tuple[l
                 "itemcard_id": int(row["itemcard_id"]),
                 "card_id": int(row["card_id"]),
                 "inv_num": row["inv_num"],
+                "mar_num": row["mar_num"],
+                "inv_num_2": row["inv_num_2"],
                 "mar_cpat": row["mar_cpat"],
                 "mar_des": row["mar_des"],
                 "inv_sit": row["inv_sit"],

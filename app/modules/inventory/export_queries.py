@@ -207,7 +207,9 @@ _CARDS_EXPORT_SELECT = """
             CASE WHEN c.state = 2 THEN 'Cerrada' ELSE 'Abierta' END AS estado,
             c.hoj_fec AS fecha,
             c.hoj_can_tot AS cantidad_total,
-            COALESCE(ic.cnt, 0) AS items,
+            COALESCE(ic.cnt, 0) AS total_bienes,
+            COALESCE(ic.cnt_con, 0) AS conciliados,
+            COALESCE(ic.cnt_sob, 0) AS sobrantes,
             COALESCE(est.code, '') AS codigo_local,
             COALESCE(est.description, '') AS local,
             COALESCE(env.code, '') AS codigo_ambiente,
@@ -216,6 +218,10 @@ _CARDS_EXPORT_SELECT = """
             COALESCE(cc.description, '') AS centro_costo,
             COALESCE(p.number, '') AS documento_usuario,
             COALESCE(p.name, '') AS usuario,
+            COALESCE(p_inv_doc.number, '') AS dni_inventariador,
+            COALESCE(p_inv_doc.name, u_inv.full_name, '') AS nombre_inventariador,
+            COALESCE(p_dig_doc.number, '') AS dni_digitador,
+            COALESCE(p_dig_doc.name, u_dig.full_name, '') AS nombre_digitador,
             CASE WHEN c.flag_firma THEN 'Si' ELSE 'No' END AS firma,
             COALESCE(c.nota_interna, '') AS nota_interna,
             COALESCE(c.nota_ficha, '') AS nota_ficha,
@@ -227,8 +233,43 @@ _CARDS_EXPORT_SELECT = """
         LEFT JOIN establishments est ON est.id = env.establishment_id AND est.tenant_id = c.tenant_id
         LEFT JOIN cost_center cc ON cc.id = c.id_ccosto AND cc.tenant_id = c.tenant_id
         LEFT JOIN persons p ON p.id = c.id_usuario AND p.tenant_id = c.tenant_id
+        LEFT JOIN users u_inv ON u_inv.id = c.id_inventariador AND u_inv.tenant_id = c.tenant_id
+        LEFT JOIN users u_dig ON u_dig.id = c.id_digitador AND u_dig.tenant_id = c.tenant_id
         LEFT JOIN LATERAL (
-            SELECT count(*)::int AS cnt
+            SELECT pi.number, pi.name
+            FROM persons pi
+            WHERE pi.tenant_id = c.tenant_id
+              AND u_inv.id IS NOT NULL
+              AND (
+                (
+                    NULLIF(pi.email, '') IS NOT NULL
+                    AND u_inv.email IS NOT NULL
+                    AND lower(pi.email) = lower(u_inv.email)
+                )
+                OR pi.name = u_inv.full_name
+              )
+            LIMIT 1
+        ) p_inv_doc ON true
+        LEFT JOIN LATERAL (
+            SELECT pi.number, pi.name
+            FROM persons pi
+            WHERE pi.tenant_id = c.tenant_id
+              AND u_dig.id IS NOT NULL
+              AND (
+                (
+                    NULLIF(pi.email, '') IS NOT NULL
+                    AND u_dig.email IS NOT NULL
+                    AND lower(pi.email) = lower(u_dig.email)
+                )
+                OR pi.name = u_dig.full_name
+              )
+            LIMIT 1
+        ) p_dig_doc ON true
+        LEFT JOIN LATERAL (
+            SELECT
+                count(*)::int AS cnt,
+                count(*) FILTER (WHERE ic2.inv_sit = 'C')::int AS cnt_con,
+                count(*) FILTER (WHERE ic2.inv_sit = 'S')::int AS cnt_sob
             FROM itemcards ic2
             WHERE ic2.id_card = c.id AND ic2.tenant_id = c.tenant_id
         ) ic ON true
