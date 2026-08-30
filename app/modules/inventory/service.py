@@ -348,6 +348,28 @@ def upsert_person(db: Session, tenant_id: UUID, body: PersonWrite) -> m.InvPerso
     return row
 
 
+def delete_person(db: Session, tenant_id: UUID, person_id: int) -> tuple[bool, str]:
+    row = db.get(m.InvPerson, person_id)
+    if not row or row.tenant_id != tenant_id:
+        return False, "Persona no encontrada"
+    cc = db.scalar(
+        select(m.InvCostCenter).where(
+            m.InvCostCenter.tenant_id == tenant_id,
+            m.InvCostCenter.personal_id == person_id,
+        )
+    )
+    if cc:
+        return False, "No se puede eliminar porque está asignado como encargado de un centro de costo."
+    card = db.scalar(
+        select(m.InvCard).where(m.InvCard.tenant_id == tenant_id, m.InvCard.id_usuario == person_id)
+    )
+    if card:
+        return False, "No se puede eliminar porque está asignado en hojas de captura."
+    db.delete(row)
+    db.commit()
+    return True, "Persona eliminada con éxito"
+
+
 def list_persons(db: Session, tenant_id: UUID, q: RecordQuery, allowed_cols: set[str]) -> tuple[list[dict], int]:
     col = q.column if q.column in allowed_cols else "name"
     stmt = select(m.InvPerson).where(m.InvPerson.tenant_id == tenant_id)
@@ -1914,6 +1936,33 @@ def upsert_list_sbn(db: Session, tenant_id: UUID, body: ListSbnWrite) -> m.InvLi
     return row
 
 
+def delete_list_sbn(db: Session, tenant_id: UUID, sbn_id: int) -> tuple[bool, str]:
+    row = db.get(m.InvListSbn, sbn_id)
+    if not row or row.tenant_id != tenant_id:
+        return False, "Registro de catálogo SBN no encontrado"
+    code = (row.code or "").strip()
+    if code:
+        marg = db.scalar(
+            select(m.InvMargesiItem).where(
+                m.InvMargesiItem.tenant_id == tenant_id,
+                m.InvMargesiItem.mar_cpat == code,
+            )
+        )
+        if marg:
+            return False, "No se puede eliminar porque hay registros de patrimonio con este código SBN."
+        item = db.scalar(
+            select(m.InvItemCard).where(
+                m.InvItemCard.tenant_id == tenant_id,
+                m.InvItemCard.mar_cpat == code,
+            )
+        )
+        if item:
+            return False, "No se puede eliminar porque hay bienes inventariados con este código SBN."
+    db.delete(row)
+    db.commit()
+    return True, "Registro de catálogo SBN eliminado con éxito"
+
+
 def list_list_sbn(db: Session, tenant_id: UUID, q: RecordQuery, allowed_cols: set[str]) -> tuple[list[dict], int]:
     col = q.column if q.column in allowed_cols else "code"
     stmt = select(m.InvListSbn).where(m.InvListSbn.tenant_id == tenant_id)
@@ -1996,6 +2045,23 @@ def upsert_margesi(db: Session, tenant_id: UUID, body: MargesiWrite) -> m.InvMar
     except Exception:
         db.rollback()
         raise
+
+
+def delete_margesi(db: Session, tenant_id: UUID, margesi_id: int) -> tuple[bool, str]:
+    row = db.get(m.InvMargesiItem, margesi_id)
+    if not row or row.tenant_id != tenant_id:
+        return False, "Registro de patrimonio no encontrado"
+    item = db.scalar(
+        select(m.InvItemCard).where(
+            m.InvItemCard.tenant_id == tenant_id,
+            m.InvItemCard.id_margesi == margesi_id,
+        )
+    )
+    if item:
+        return False, "No se puede eliminar porque está vinculado a un bien inventariado."
+    db.delete(row)
+    db.commit()
+    return True, "Registro de patrimonio eliminado con éxito"
 
 
 _MARGESI_FALTANTE_INV_SIT = frozenset({"-", "—", "–"})

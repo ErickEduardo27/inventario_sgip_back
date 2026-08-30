@@ -217,32 +217,20 @@ WHERE m.tenant_id = CAST(:tenant_id AS uuid)
   )
 """
 
-# Filtro por local (misma lógica que ``reporte_aptot_cache`` / export por establishment).
+# Filtro por local (``sp_reporte_aptot_local``): físico en el local o Margesi apunta al local.
 _LOCAL_FILTER_ITEMCARD = """
   AND (
     ee.id = %s
-    OR est.id = %s
-    OR ee.code = (
-        SELECT code FROM establishments
-        WHERE tenant_id = %s::uuid AND id = %s
-        LIMIT 1
-    )
-    OR est.code = (
-        SELECT code FROM establishments
-        WHERE tenant_id = %s::uuid AND id = %s
-        LIMIT 1
-    )
+    OR (ee.id IS DISTINCT FROM %s AND est.id = %s)
   )
 """
 
+# Margesi del local sin inventario: ``inv_sit`` NULL o no conciliable (``N``).
 _LOCAL_FILTER_MARGESI = """
+  AND est.id = %s
   AND (
-    est.id = %s
-    OR est.code = (
-        SELECT code FROM establishments
-        WHERE tenant_id = %s::uuid AND id = %s
-        LIMIT 1
-    )
+    m.inv_sit IS NULL
+    OR UPPER(TRIM(COALESCE(m.inv_sit, ''))) = 'N'
   )
 """
 
@@ -258,7 +246,10 @@ SELECT
     itc.id AS itemcard_id,
     itc.mar_sit_conta,
     itc.mar_cpat,
-    itc.inv_sit AS state,
+    CASE
+        WHEN ee.id IS DISTINCT FROM %s THEN 'CR'
+        ELSE UPPER(TRIM(COALESCE(itc.inv_sit, '')))
+    END AS state,
     itc.inv_sit,
     itc.inv_con,
     {_ic("mar_npri")} AS mar_npri,
@@ -334,7 +325,7 @@ LEFT JOIN establishments est ON est.id = env.establishment_id AND est.tenant_id 
 LEFT JOIN departments de ON de.id = est.department_id
 LEFT JOIN persons pe ON pe.tenant_id = itc.tenant_id AND pe.extra->>'codigo_interno' = ma.usu_cod
 WHERE itc.tenant_id = %s::uuid
-  AND UPPER(TRIM(COALESCE(itc.inv_sit, ''))) IN ('C', 'S')
+  AND UPPER(TRIM(COALESCE(itc.inv_sit, ''))) IN ('C', 'S', 'F')
 {_LOCAL_FILTER_ITEMCARD}
 """
 
@@ -383,9 +374,9 @@ SELECT
     NULL AS ambiente_description,
     NULL AS ambiente_piso,
     NULL AS ambiente_piso_des,
-    NULL AS local_description,
-    NULL AS local_code,
-    NULL AS local_departamento,
+    est.description AS local_description,
+    est.code AS local_code,
+    de.description AS local_departamento,
     NULL AS usuario_code,
     NULL AS usuario,
     m.mar_cont_fec AS fecha_margesi,
@@ -423,10 +414,6 @@ WHERE m.tenant_id = %s::uuid
       FROM itemcards ic
       WHERE ic.tenant_id = m.tenant_id
         AND ic.id_margesi = m.id
-  )
-  AND NOT (
-      UPPER(TRIM(COALESCE(m.inv_sit, ''))) = 'C'
-      AND NULLIF(TRIM(COALESCE(m.inv_num, '')), '') IS NOT NULL
   )
 {_LOCAL_FILTER_MARGESI}
 """

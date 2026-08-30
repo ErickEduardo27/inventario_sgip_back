@@ -131,7 +131,9 @@ def export_reporte_aptot_locales_csv_task(
         payload = copy_query_to_csv_bytes(inner_sql, params)
         if fmt == "xlsx":
             self.update_state(state="PROGRESS", meta=_progress_meta(45, "Convirtiendo a Excel…"))
-            content = csv_bytes_to_xlsx_bytes(payload)
+            from app.modules.inventory.aptot_locales_excel import csv_bytes_to_aptot_locales_xlsx_bytes
+
+            content = csv_bytes_to_aptot_locales_xlsx_bytes(payload)
         else:
             content = b"\xef\xbb\xbf" + payload
 

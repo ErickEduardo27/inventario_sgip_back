@@ -344,10 +344,10 @@ def establishment_save(
     _: User = Depends(get_current_user),
 ):
     try:
-        inv.upsert_establishment(db, tenant_id, body)
+        row = inv.upsert_establishment(db, tenant_id, body)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
-    return OkPayload(success=True, message="Establecimiento guardado")
+    return OkPayload(success=True, message="Establecimiento guardado", id=row.id)
 
 
 @router.post("/establishments/import", response_model=EstablishmentImportResult)
@@ -466,6 +466,14 @@ def person_save(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     return OkPayload(success=True, message="Persona guardada", id=row.id)
+
+
+@router.delete("/persons/{row_id}", response_model=OkPayload)
+def person_delete(row_id: int, db: Session = Depends(get_db), tenant_id: UUID = Depends(get_tenant_id), _: User = Depends(get_current_user)):
+    ok, msg = inv.delete_person(db, tenant_id, row_id)
+    if not ok:
+        raise HTTPException(status_code=400, detail=msg)
+    return OkPayload(success=True, message=msg)
 
 
 @router.post("/persons/import", response_model=PersonImportResult)
@@ -1206,6 +1214,14 @@ def list_sbn_save(
     return OkPayload(success=True, message="Catálogo SBN guardado", id=row.id)
 
 
+@router.delete("/list-sbn/{row_id}", response_model=OkPayload)
+def list_sbn_delete(row_id: int, db: Session = Depends(get_db), tenant_id: UUID = Depends(get_tenant_id), _: User = Depends(get_current_user)):
+    ok, msg = inv.delete_list_sbn(db, tenant_id, row_id)
+    if not ok:
+        raise HTTPException(status_code=400, detail=msg)
+    return OkPayload(success=True, message=msg)
+
+
 @router.post("/list-sbn/import", response_model=ListSbnImportResult)
 async def list_sbn_import(
     file: UploadFile = File(...),
@@ -1290,6 +1306,14 @@ def margesi_save(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     return OkPayload(success=True, message="Registro margesi guardado", id=row.id)
+
+
+@router.delete("/margesi/{row_id}", response_model=OkPayload)
+def margesi_delete(row_id: int, db: Session = Depends(get_db), tenant_id: UUID = Depends(get_tenant_id), _: User = Depends(get_current_user)):
+    ok, msg = inv.delete_margesi(db, tenant_id, row_id)
+    if not ok:
+        raise HTTPException(status_code=400, detail=msg)
+    return OkPayload(success=True, message=msg)
 
 
 @router.post("/margesi/import", response_model=MargesiImportResult)
