@@ -492,83 +492,16 @@ def build_reporte_aptot_locales_export_query(
     establishment_id: int,
 ) -> tuple[str, tuple[Any, ...], str]:
     """CSV/Excel APTOT filtrado por local, generado en vivo (sin cache global)."""
-    from app.modules.inventory.reporte_aptot_local_status import _SIT_CONT_SQL, _SIT_PAT_SQL
+    from app.modules.inventory.reporte_aptot_locales_export_columns import (
+        REPORTE_APTOT_LOCALES_EXPORT_COLUMNS_SQL,
+    )
     from app.modules.inventory.reporte_aptot_sql import REPORTE_APTOT_LOCALES_LIVE_UNION_SQL
 
     tid = str(tenant_id)
     est_id = int(establishment_id)
     sql = f"""
         SELECT
-            aptot.source_kind,
-            aptot.source_ref_id,
-            aptot.itemcard_id,
-            aptot.mar_sit_conta,
-            aptot.mar_cpat,
-            aptot.state,
-            aptot.inv_sit,
-            aptot.inv_con,
-            aptot.mar_npri,
-            aptot.mar_num,
-            aptot.mar_ccat,
-            aptot.mar_des,
-            aptot.mar_esp,
-            aptot.mar_est,
-            aptot.mar_uso,
-            aptot.mar_seg,
-            aptot.mar_col,
-            aptot.mar_mar,
-            aptot.mar_mod,
-            aptot.mar_tip,
-            aptot.mar_ser,
-            aptot.mar_med,
-            aptot.mar_npla,
-            aptot.mar_nmot,
-            aptot.mar_ncha,
-            aptot.mar_obs,
-            aptot.inv_num_1,
-            aptot.inv_num_2,
-            aptot.inv_num,
-            aptot.item_created_at,
-            aptot.item_updated_at,
-            aptot.hoj_num,
-            aptot.hoj_fec,
-            aptot.area_code,
-            aptot.area_description,
-            aptot.ambiente_code,
-            aptot.ambiente_description,
-            aptot.ambiente_piso,
-            aptot.ambiente_piso_des,
-            aptot.local_description,
-            aptot.local_code,
-            aptot.local_departamento,
-            aptot.usuario_code,
-            aptot.usuario,
-            aptot.fecha_margesi,
-            aptot.doc_margesi,
-            aptot.cuenta_margesi,
-            aptot.valor_margesi,
-            aptot.margesi_sbn,
-            aptot.margesi_area,
-            aptot.margesi_departamento,
-            aptot.margesi_local,
-            aptot.margesi_ambiente,
-            aptot.margesi_usuario,
-            aptot.margesi_description,
-            aptot.margesi_marca,
-            aptot.margesi_modelo,
-            aptot.margesi_tipo,
-            aptot.margesi_serie,
-            aptot.margesi_cod_local,
-            aptot.local_id,
-            aptot.margesi_obs,
-            aptot.local_libre,
-            aptot.ccosto_libre,
-            aptot.ambiente_libre,
-            aptot.usuario_libre,
-            aptot.campo_libre,
-            aptot.refreshed_at,
-            {_SIT_PAT_SQL} AS "SIT_PAT",
-            {_SIT_CONT_SQL} AS "SIT_CONT"
+{REPORTE_APTOT_LOCALES_EXPORT_COLUMNS_SQL}
         FROM (
 {REPORTE_APTOT_LOCALES_LIVE_UNION_SQL}
         ) aptot

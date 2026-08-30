@@ -4,13 +4,29 @@ from __future__ import annotations
 
 import io
 import re
+from uuid import UUID
 
 import pandas as pd
 from openpyxl import Workbook
 from openpyxl.styles import PatternFill
 
-from app.modules.inventory.excel_styled_export import _normalize_header, _populate_styled_sheet
+from app.modules.inventory.excel_styled_export import (
+    ColumnFormat,
+    _normalize_header,
+    _populate_styled_sheet,
+)
 from app.modules.inventory.reporte_aptot_local_status import APTOT_LOCAL_SIT_PAT_ROW_COLORS
+from app.modules.tenants.theme import primary_hex_openpyxl
+
+APTOT_LOCALES_COLUMN_FORMATS: dict[str, ColumnFormat] = {
+    "hoja": "integer",
+    "f.captura": "date",
+    "fecha": "date",
+    "depreciación": "currency_pen",
+    "depreciacion": "currency_pen",
+    "valor_neto": "currency_pen",
+    "valor": "currency_pen",
+}
 
 
 def _sit_pat_row_fill(sit_pat: str) -> PatternFill | None:
@@ -31,8 +47,7 @@ def _apply_sit_pat_row_colors(ws, df: pd.DataFrame) -> None:
 
     sit_pat_idx: int | None = None
     for idx, header in enumerate(headers):
-        normalized = _normalize_header(header)
-        if normalized in ("sit_pat", "sit pat"):
+        if _normalize_header(header) == "sit_pat":
             sit_pat_idx = idx
             break
     if sit_pat_idx is None:
@@ -48,7 +63,7 @@ def _apply_sit_pat_row_colors(ws, df: pd.DataFrame) -> None:
             ws.cell(row=excel_row, column=col_idx).fill = fill
 
 
-def csv_bytes_to_aptot_locales_xlsx_bytes(csv_payload: bytes) -> bytes:
+def csv_bytes_to_aptot_locales_xlsx_bytes(csv_payload: bytes, tenant_id: UUID) -> bytes:
     """Convierte CSV del reporte APTOT local a Excel con colores por SIT_PAT."""
     text = csv_payload.decode("utf-8-sig", errors="replace")
     df = pd.read_csv(io.StringIO(text), dtype=str, keep_default_na=False)
@@ -56,7 +71,14 @@ def csv_bytes_to_aptot_locales_xlsx_bytes(csv_payload: bytes) -> bytes:
     wb = Workbook()
     ws = wb.active
     ws.title = "APTOT local"
-    _populate_styled_sheet(ws, df, {}, header_color_hex="2474F5")
+    header_color = primary_hex_openpyxl(tenant_id)
+    _populate_styled_sheet(
+        ws,
+        df,
+        APTOT_LOCALES_COLUMN_FORMATS,
+        header_color_hex=header_color,
+        preserve_header_labels=True,
+    )
     _apply_sit_pat_row_colors(ws, df)
 
     out = io.BytesIO()

@@ -190,13 +190,14 @@ def _populate_styled_sheet(
     profiles: dict[str, ColumnFormat],
     *,
     header_color_hex: str | None = None,
+    preserve_header_labels: bool = False,
 ) -> None:
     headers = [str(h) for h in df.columns.tolist()]
     if not headers:
         return
 
     header_fill = _header_fill(header_color_hex)
-    display_headers = [_format_display_header(header) for header in headers]
+    display_headers = headers if preserve_header_labels else [_format_display_header(header) for header in headers]
 
     for col_idx, display_header in enumerate(display_headers, start=1):
         cell = ws.cell(row=1, column=col_idx, value=display_header)

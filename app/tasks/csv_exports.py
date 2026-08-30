@@ -133,7 +133,7 @@ def export_reporte_aptot_locales_csv_task(
             self.update_state(state="PROGRESS", meta=_progress_meta(45, "Convirtiendo a Excel…"))
             from app.modules.inventory.aptot_locales_excel import csv_bytes_to_aptot_locales_xlsx_bytes
 
-            content = csv_bytes_to_aptot_locales_xlsx_bytes(payload)
+            content = csv_bytes_to_aptot_locales_xlsx_bytes(payload, tenant_uuid)
         else:
             content = b"\xef\xbb\xbf" + payload
 

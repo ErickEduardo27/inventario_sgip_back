@@ -310,7 +310,10 @@ SELECT
     ma.ccosto_libre,
     ma.ambiente_libre,
     ma.usuario_libre,
-    ma.campo_libre
+    ma.campo_libre,
+    ma.mar_dep_acum,
+    ma.mar_net_val,
+    ma.inv_num AS margesi_inv_num
 FROM itemcards itc
 LEFT JOIN cards ca ON ca.id = itc.id_card AND ca.tenant_id = itc.tenant_id
 LEFT JOIN margesi ma ON ma.id = itc.id_margesi AND ma.tenant_id = itc.tenant_id
@@ -401,7 +404,10 @@ SELECT
     m.ccosto_libre,
     m.ambiente_libre,
     m.usuario_libre,
-    m.campo_libre
+    m.campo_libre,
+    m.mar_dep_acum,
+    m.mar_net_val,
+    m.inv_num AS margesi_inv_num
 FROM margesi m
 LEFT JOIN cost_center cct ON cct.code = m.cct_cod AND cct.tenant_id = m.tenant_id
 LEFT JOIN enviroments env ON env.code = CONCAT(COALESCE(m.amb_cod, ''), '01') AND env.tenant_id = m.tenant_id
