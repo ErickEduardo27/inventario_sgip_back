@@ -7,7 +7,6 @@ from app.modules.inventory.reporte_aptot_local_status import _SIT_CONT_SQL, _SIT
 REPORTE_APTOT_LOCALES_EXPORT_COLUMNS_SQL = f"""
             {_SIT_CONT_SQL} AS "SIT_CONT",
             {_SIT_PAT_SQL} AS "SIT_PAT",
-            COALESCE(aptot.mar_cpat, '') AS "Codigo ant.",
             COALESCE(aptot.hoj_num::text, '') AS "Hoja",
             COALESCE(to_char(aptot.hoj_fec, 'YYYY-MM-DD'), '') AS "F.Captura",
             COALESCE(EXTRACT(YEAR FROM aptot.hoj_fec)::text, '') AS "F.C. Año",
@@ -28,8 +27,17 @@ REPORTE_APTOT_LOCALES_EXPORT_COLUMNS_SQL = f"""
             COALESCE(aptot.mar_num, '') AS "Codigo Interno",
             COALESCE(aptot.mar_sit_conta, '') AS "Sit. Contable",
             COALESCE(aptot.inv_con, '') AS "Ubi",
-            COALESCE(aptot.margesi_inv_num::text, '') AS "Inv. Num",
-            COALESCE(aptot.mar_ccat, '') AS "SBN",
+            COALESCE(
+                NULLIF(TRIM(COALESCE(aptot.margesi_inv_num::text, '')), ''),
+                NULLIF(TRIM(COALESCE(aptot.inv_num::text, '')), ''),
+                ''
+            ) AS "Inv. Num",
+            COALESCE(
+                NULLIF(TRIM(COALESCE(aptot.mar_ccat, '')), ''),
+                NULLIF(TRIM(COALESCE(aptot.mar_cpat, '')), ''),
+                NULLIF(TRIM(COALESCE(aptot.margesi_sbn, '')), ''),
+                ''
+            ) AS "SBN",
             COALESCE(aptot.mar_des, '') AS "Descripcion",
             COALESCE(aptot.mar_esp, '') AS "Especificaciones",
             COALESCE(aptot.mar_est::text, '') AS "Est",
@@ -62,10 +70,14 @@ REPORTE_APTOT_LOCALES_EXPORT_COLUMNS_SQL = f"""
             COALESCE(aptot.margesi_modelo, '') AS "Modelo Margesi",
             COALESCE(aptot.margesi_tipo, '') AS "Tipo Margesi",
             COALESCE(aptot.margesi_serie, '') AS "Serie Margesi",
-            COALESCE(aptot.margesi_cod_local, '') AS "Cod.Local Margesi",
-            COALESCE(aptot.local_libre, '') AS "Local libre",
-            COALESCE(aptot.ccosto_libre, '') AS "C. Costo libre",
-            COALESCE(aptot.ambiente_libre, '') AS "Ambiente libre",
-            COALESCE(aptot.usuario_libre, '') AS "Usuario libre",
+            CASE
+                WHEN UPPER(TRIM(COALESCE(aptot.inv_sit, ''))) = 'S' THEN ''
+                ELSE COALESCE(aptot.margesi_cod_local, '')
+            END AS "Cod.Local Historico",
+            COALESCE(aptot.local_libre, '') AS "Local Historico",
+            COALESCE(aptot.ccosto_libre, '') AS "Centro de Costo Historico",
+            COALESCE(aptot.ambiente_libre, '') AS "Ambiente Historico",
+            COALESCE(aptot.usuario_libre, '') AS "Usuario Historico",
+            COALESCE(aptot.piso_historico, '') AS "Piso Historico",
             COALESCE(aptot.campo_libre, '') AS "Campo libre"
 """

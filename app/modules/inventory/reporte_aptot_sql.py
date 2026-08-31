@@ -31,6 +31,56 @@ def _ic(field: str) -> str:
     return f"COALESCE(itc.extra->>'{field}', '')"
 
 
+def _piso_descripcion_itemcard_sql() -> str:
+    """Descripción del piso (mismo local y código de piso que el ambiente físico)."""
+    return """
+(
+    SELECT ep.description
+    FROM enviroments ep
+    WHERE ep.tenant_id = itc.tenant_id
+      AND ep.establishment_id = ee.id
+      AND COALESCE(TRIM(ep.floor), '') = COALESCE(TRIM(e.floor), '')
+      AND NULLIF(TRIM(COALESCE(ep.description, '')), '') IS NOT NULL
+    ORDER BY ep.code
+    LIMIT 1
+)
+"""
+
+
+def _piso_libre_ma_sql() -> str:
+    return """
+COALESCE(
+    NULLIF(TRIM(
+        CASE
+            WHEN ma.extra IS NULL
+              OR TRIM(COALESCE(ma.extra, '')) = ''
+              OR UPPER(TRIM(ma.extra)) = 'NULL'
+            THEN NULL
+            ELSE ma.extra::jsonb->>'piso_libre'
+        END
+    ), ''),
+    NULLIF(TRIM(COALESCE(itc.extra->>'piso_libre', '')), ''),
+    ''
+)
+"""
+
+
+def _piso_libre_m_sql() -> str:
+    return """
+COALESCE(
+    NULLIF(TRIM(
+        CASE
+            WHEN m.extra IS NULL
+              OR TRIM(COALESCE(m.extra, '')) = ''
+              OR UPPER(TRIM(m.extra)) = 'NULL'
+            THEN NULL
+            ELSE m.extra::jsonb->>'piso_libre'
+        END
+    ), ''),
+    ''
+)
+"""
+
 # Bienes inventariados: conciliados (C) y sobrantes (S).
 _ITEMCARD_SELECT = f"""
 SELECT
@@ -282,7 +332,7 @@ SELECT
     e.code AS ambiente_code,
     e.description AS ambiente_description,
     e.floor AS ambiente_piso,
-    e.floor AS ambiente_piso_des,
+    COALESCE({_piso_descripcion_itemcard_sql()}, e.description, '') AS ambiente_piso_des,
     ee.description AS local_description,
     ee.code AS local_code,
     d.description AS local_departamento,
@@ -313,7 +363,8 @@ SELECT
     ma.campo_libre,
     ma.mar_dep_acum,
     ma.mar_net_val,
-    ma.inv_num AS margesi_inv_num
+    ma.inv_num AS margesi_inv_num,
+    {_piso_libre_ma_sql()} AS piso_historico
 FROM itemcards itc
 LEFT JOIN cards ca ON ca.id = itc.id_card AND ca.tenant_id = itc.tenant_id
 LEFT JOIN margesi ma ON ma.id = itc.id_margesi AND ma.tenant_id = itc.tenant_id
@@ -338,7 +389,7 @@ SELECT
     m.id AS source_ref_id,
     NOW() AT TIME ZONE 'UTC' AS refreshed_at,
     NULL AS itemcard_id,
-    NULL AS mar_sit_conta,
+    m.mar_sit_conta,
     NULL AS mar_cpat,
     CASE
         WHEN UPPER(TRIM(COALESCE(m.inv_sit, ''))) = 'N' THEN 'N'
@@ -375,8 +426,8 @@ SELECT
     NULL AS area_description,
     NULL AS ambiente_code,
     NULL AS ambiente_description,
-    NULL AS ambiente_piso,
-    NULL AS ambiente_piso_des,
+    env.floor AS ambiente_piso,
+    COALESCE(env.description, '') AS ambiente_piso_des,
     est.description AS local_description,
     est.code AS local_code,
     de.description AS local_departamento,
@@ -407,7 +458,8 @@ SELECT
     m.campo_libre,
     m.mar_dep_acum,
     m.mar_net_val,
-    m.inv_num AS margesi_inv_num
+    m.inv_num AS margesi_inv_num,
+    {_piso_libre_m_sql()} AS piso_historico
 FROM margesi m
 LEFT JOIN cost_center cct ON cct.code = m.cct_cod AND cct.tenant_id = m.tenant_id
 LEFT JOIN enviroments env ON env.code = CONCAT(COALESCE(m.amb_cod, ''), '01') AND env.tenant_id = m.tenant_id

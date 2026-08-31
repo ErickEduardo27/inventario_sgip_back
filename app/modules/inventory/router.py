@@ -1255,6 +1255,11 @@ async def list_sbn_import(
 # --- Margesi (patrimonio) ---
 
 
+@router.get("/margesi/stats-summary")
+def margesi_stats_summary(db: Session = Depends(get_db), tenant_id: UUID = Depends(get_tenant_id)):
+    return inv.get_margesi_stats_summary(db, tenant_id)
+
+
 @router.get("/margesi/records", response_model=PagedRows)
 def margesi_records(db: Session = Depends(get_db), tenant_id: UUID = Depends(get_tenant_id), q: RecordQuery = Depends(_q)):
     allowed = {"inv_num", "mar_cpat", "mar_des", "inv_sit", "mar_num", "mar_mar", "mar_mod"}

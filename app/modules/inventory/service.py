@@ -2120,6 +2120,42 @@ def list_margesi(db: Session, tenant_id: UUID, q: RecordQuery, allowed_cols: set
     return out, total
 
 
+def get_margesi_stats_summary(db: Session, tenant_id: UUID) -> dict[str, int]:
+    """Totales globales de margesi (una consulta agregada, sin paginar filas)."""
+    row = db.execute(
+        text(
+            """
+            SELECT
+                COUNT(*)::int AS total,
+                COUNT(*) FILTER (
+                    WHERE inv_num IS NULL OR TRIM(COALESCE(inv_num, '')) = ''
+                )::int AS sin_inv,
+                COUNT(*) FILTER (
+                    WHERE LOWER(TRIM(COALESCE(mar_uso, ''))) = 'n'
+                       OR LOWER(COALESCE(
+                            CASE
+                                WHEN extra IS NULL
+                                  OR TRIM(COALESCE(extra, '')) = ''
+                                  OR UPPER(TRIM(extra)) = 'NULL'
+                                THEN NULL
+                                ELSE extra::jsonb->>'operatividad'
+                            END,
+                            ''
+                        )) LIKE '%no oper%'
+                )::int AS inoperativos
+            FROM margesi
+            WHERE tenant_id = CAST(:tenant_id AS uuid)
+            """
+        ),
+        {"tenant_id": str(tenant_id)},
+    ).one()
+    return {
+        "total": int(row.total or 0),
+        "sin_inv": int(row.sin_inv or 0),
+        "inoperativos": int(row.inoperativos or 0),
+    }
+
+
 _ITEM_PHOTOS_SELECT = """
 SELECT
     ic.id AS itemcard_id,
