@@ -27,37 +27,127 @@ DASHBOARD_STATS_IMPORT_MODULES = frozenset(
     }
 )
 
+# Margesi e inventario se agregan en subconsultas separadas.
+# Un JOIN único (margesi × ambientes × hojas × itemcards) genera producto cartesiano
+# y puede tardar >20 min en un local grande.
 _ESTABLISHMENT_STATS_SQL = """
     SELECT
         e.id AS establishment_id,
         e.code AS establishment_code,
         e.description AS establishment_description,
-        COUNT(DISTINCT marg.id) AS margesi_total,
-        COUNT(DISTINCT marg.id) FILTER (WHERE marg.inv_sit = 'C') AS margesi_conciliado,
-        COUNT(DISTINCT marg.id) FILTER (
-            WHERE marg.inv_sit IS NULL
-               OR TRIM(COALESCE(marg.inv_sit, '')) = ''
-               OR marg.inv_sit IN ('-', '—', '–')
-        ) AS margesi_faltantes,
-        COUNT(DISTINCT marg.id) FILTER (WHERE marg.inv_sit = 'N') AS margesi_no_inventariable,
-        COUNT(DISTINCT ic.id) AS inventario_total,
-        COUNT(DISTINCT ic.id) FILTER (WHERE ic.inv_sit = 'C') AS inventario_conciliado,
-        COUNT(DISTINCT ic.id) FILTER (WHERE ic.inv_sit = 'S') AS inventario_sobrante,
-        COUNT(DISTINCT ic.id) FILTER (WHERE ic.inv_sit = 'N') AS inventario_no_conciliable
+        COALESCE(ms.margesi_total, 0) AS margesi_total,
+        COALESCE(ms.margesi_conciliado, 0) AS margesi_conciliado,
+        COALESCE(ms.margesi_faltantes, 0) AS margesi_faltantes,
+        COALESCE(ms.margesi_no_inventariable, 0) AS margesi_no_inventariable,
+        COALESCE(inv.inventario_total, 0) AS inventario_total,
+        COALESCE(inv.inventario_conciliado, 0) AS inventario_conciliado,
+        COALESCE(inv.inventario_sobrante, 0) AS inventario_sobrante,
+        COALESCE(inv.inventario_no_conciliable, 0) AS inventario_no_conciliable
     FROM establishments e
-    LEFT JOIN margesi marg
-        ON marg.tenant_id = e.tenant_id AND marg.amb_cod = e.code
-    LEFT JOIN enviroments env
-        ON env.tenant_id = e.tenant_id AND env.establishment_id = e.id
-    LEFT JOIN cards c
-        ON c.tenant_id = e.tenant_id AND c.id_ambiente = env.id
-    LEFT JOIN itemcards ic
-        ON ic.tenant_id = c.tenant_id AND ic.id_card = c.id
+    LEFT JOIN (
+        SELECT
+            e2.id AS establishment_id,
+            COUNT(marg.id)::int AS margesi_total,
+            COUNT(marg.id) FILTER (WHERE marg.inv_sit = 'C')::int AS margesi_conciliado,
+            COUNT(marg.id) FILTER (
+                WHERE marg.inv_sit IS NULL
+                   OR TRIM(COALESCE(marg.inv_sit, '')) = ''
+                   OR marg.inv_sit IN ('-', '—', '–')
+            )::int AS margesi_faltantes,
+            COUNT(marg.id) FILTER (WHERE marg.inv_sit = 'N')::int AS margesi_no_inventariable
+        FROM establishments e2
+        INNER JOIN margesi marg
+            ON marg.tenant_id = e2.tenant_id AND marg.amb_cod = e2.code
+        WHERE e2.tenant_id = CAST(:tenant_id AS uuid)
+          {establishment_filter_e2}
+        GROUP BY e2.id
+    ) ms ON ms.establishment_id = e.id
+    LEFT JOIN (
+        SELECT
+            env.establishment_id,
+            COUNT(ic.id)::int AS inventario_total,
+            COUNT(ic.id) FILTER (WHERE ic.inv_sit = 'C')::int AS inventario_conciliado,
+            COUNT(ic.id) FILTER (WHERE ic.inv_sit = 'S')::int AS inventario_sobrante,
+            COUNT(ic.id) FILTER (WHERE ic.inv_sit = 'N')::int AS inventario_no_conciliable
+        FROM enviroments env
+        INNER JOIN cards c
+            ON c.tenant_id = env.tenant_id AND c.id_ambiente = env.id
+        INNER JOIN itemcards ic
+            ON ic.tenant_id = c.tenant_id AND ic.id_card = c.id
+        WHERE env.tenant_id = CAST(:tenant_id AS uuid)
+          {establishment_filter_env}
+        GROUP BY env.establishment_id
+    ) inv ON inv.establishment_id = e.id
     WHERE e.tenant_id = CAST(:tenant_id AS uuid)
-      {establishment_filter}
-    GROUP BY e.id, e.code, e.description
+      {establishment_filter_e}
     ORDER BY e.code ASC
 """
+
+_QUEUE_TTL_SECONDS = 90
+_RUN_TTL_SECONDS = 1800
+_redis_client = None
+
+
+def _stats_redis():
+    """Cliente Redis del broker Celery (None si Redis no está disponible)."""
+    global _redis_client
+    if _redis_client is not None:
+        return _redis_client
+    try:
+        from redis import Redis
+
+        from app.core.config import get_settings
+
+        url = (get_settings().celery_broker_url or "").strip() or "redis://127.0.0.1:6379/0"
+        _redis_client = Redis.from_url(url, decode_responses=True)
+        return _redis_client
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Redis no disponible para debounce dashboard stats: %s", exc)
+        return None
+
+
+def _try_acquire(key: str, ttl: int) -> bool:
+    client = _stats_redis()
+    if client is None:
+        return True
+    try:
+        return bool(client.set(key, "1", nx=True, ex=ttl))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("No se pudo tomar lock %s: %s", key, exc)
+        return True
+
+
+def release_dashboard_stats_lock(key: str) -> None:
+    client = _stats_redis()
+    if client is None:
+        return
+    try:
+        client.delete(key)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("No se pudo liberar lock %s: %s", key, exc)
+
+
+def dashboard_stats_queue_key(tenant_id: UUID, establishment_id: int | None = None) -> str:
+    if establishment_id is None:
+        return f"dash-est-stats:q-tenant:{tenant_id}"
+    return f"dash-est-stats:q:{tenant_id}:{int(establishment_id)}"
+
+
+def dashboard_stats_run_key(tenant_id: UUID, establishment_id: int | None = None) -> str:
+    if establishment_id is None:
+        return f"dash-est-stats:run-tenant:{tenant_id}"
+    return f"dash-est-stats:run:{tenant_id}:{int(establishment_id)}"
+
+
+def try_begin_dashboard_stats_run(tenant_id: UUID, establishment_id: int | None = None) -> bool:
+    """Evita que dos workers recalculen el mismo local a la vez."""
+    qkey = dashboard_stats_queue_key(tenant_id, establishment_id)
+    release_dashboard_stats_lock(qkey)
+    return _try_acquire(dashboard_stats_run_key(tenant_id, establishment_id), _RUN_TTL_SECONDS)
+
+
+def end_dashboard_stats_run(tenant_id: UUID, establishment_id: int | None = None) -> None:
+    release_dashboard_stats_lock(dashboard_stats_run_key(tenant_id, establishment_id))
 
 
 def _row_to_cache_dict(row: Any, refreshed_at: datetime) -> dict[str, Any]:
@@ -85,18 +175,40 @@ def _fetch_stats_rows(
 ) -> list[dict[str, Any]]:
     refreshed_at = datetime.now(timezone.utc)
     if establishment_id is not None:
-        filt = "AND e.id = :establishment_id"
         bind: dict[str, Any] = {
             "tenant_id": str(tenant_id),
             "establishment_id": establishment_id,
         }
+        sql = _ESTABLISHMENT_STATS_SQL.format(
+            establishment_filter_e="AND e.id = :establishment_id",
+            establishment_filter_e2="AND e2.id = :establishment_id",
+            establishment_filter_env="AND env.establishment_id = :establishment_id",
+        )
     else:
-        filt = ""
         bind = {"tenant_id": str(tenant_id)}
-
-    sql = _ESTABLISHMENT_STATS_SQL.format(establishment_filter=filt)
+        sql = _ESTABLISHMENT_STATS_SQL.format(
+            establishment_filter_e="",
+            establishment_filter_e2="",
+            establishment_filter_env="",
+        )
     rows = db.execute(text(sql), bind).mappings().all()
     return [_row_to_cache_dict(row, refreshed_at) for row in rows]
+
+
+def _public_stats_dict(row: Any) -> dict[str, Any]:
+    return {
+        "establishment_id": int(row.establishment_id),
+        "establishment_code": row.establishment_code,
+        "establishment_description": row.establishment_description,
+        "margesi_total": int(row.margesi_total or 0),
+        "margesi_conciliado": int(row.margesi_conciliado or 0),
+        "margesi_faltantes": int(row.margesi_faltantes or 0),
+        "margesi_no_inventariable": int(row.margesi_no_inventariable or 0),
+        "inventario_total": int(row.inventario_total or 0),
+        "inventario_conciliado": int(row.inventario_conciliado or 0),
+        "inventario_sobrante": int(row.inventario_sobrante or 0),
+        "inventario_no_conciliable": int(row.inventario_no_conciliable or 0),
+    }
 
 
 def get_establishment_stats_live(
@@ -109,6 +221,26 @@ def get_establishment_stats_live(
     if not rows:
         raise ValueError("Local no encontrado")
     return {k: v for k, v in rows[0].items() if k != "refreshed_at"}
+
+
+def get_establishment_stats(
+    db: Session,
+    tenant_id: UUID,
+    establishment_id: int,
+    *,
+    live: bool = False,
+) -> dict[str, Any]:
+    """Lee cache materializado; si no hay fila, calcula en vivo."""
+    if not live:
+        cached = db.scalar(
+            select(m.InvDashboardEstablishmentStat).where(
+                m.InvDashboardEstablishmentStat.tenant_id == tenant_id,
+                m.InvDashboardEstablishmentStat.establishment_id == establishment_id,
+            ),
+        )
+        if cached is not None:
+            return _public_stats_dict(cached)
+    return get_establishment_stats_live(db, tenant_id, establishment_id)
 
 
 def _upsert_stats_rows(db: Session, tenant_id: UUID, rows: list[dict[str, Any]]) -> int:
@@ -286,10 +418,17 @@ def schedule_dashboard_establishment_stats_refresh(
     tenant_id: UUID,
     establishment_ids: Iterable[int],
     *,
-    countdown: int = 3,
+    countdown: int = 8,
 ) -> None:
     unique_ids = sorted({int(eid) for eid in establishment_ids if eid})
     if not unique_ids:
+        return
+    to_queue = [
+        eid
+        for eid in unique_ids
+        if _try_acquire(dashboard_stats_queue_key(tenant_id, eid), _QUEUE_TTL_SECONDS)
+    ]
+    if not to_queue:
         return
     try:
         from app.tasks.dashboard_establishment_stats import (
@@ -297,18 +436,22 @@ def schedule_dashboard_establishment_stats_refresh(
             refresh_dashboard_establishment_stats_task,
         )
 
-        if len(unique_ids) == 1:
-            eid = unique_ids[0]
+        if len(to_queue) == 1:
+            eid = to_queue[0]
             refresh_dashboard_establishment_stats_task.apply_async(
                 args=[str(tenant_id), eid],
                 countdown=countdown,
+                expires=max(countdown + 600, 900),
             )
         else:
             refresh_dashboard_establishment_stats_bulk_task.apply_async(
-                args=[str(tenant_id), unique_ids],
+                args=[str(tenant_id), to_queue],
                 countdown=countdown,
+                expires=max(countdown + 600, 900),
             )
     except Exception as exc:  # noqa: BLE001
+        for eid in to_queue:
+            release_dashboard_stats_lock(dashboard_stats_queue_key(tenant_id, eid))
         logger.warning("No se pudo encolar refresh dashboard establishment stats: %s", exc)
 
 
@@ -317,14 +460,18 @@ def schedule_dashboard_establishment_stats_tenant_refresh(
     *,
     countdown: int = 5,
 ) -> None:
+    if not _try_acquire(dashboard_stats_queue_key(tenant_id), _QUEUE_TTL_SECONDS):
+        return
     try:
         from app.tasks.dashboard_establishment_stats import refresh_dashboard_establishment_stats_tenant_task
 
         refresh_dashboard_establishment_stats_tenant_task.apply_async(
             args=[str(tenant_id)],
             countdown=countdown,
+            expires=max(countdown + 600, 900),
         )
     except Exception as exc:  # noqa: BLE001
+        release_dashboard_stats_lock(dashboard_stats_queue_key(tenant_id))
         logger.warning("No se pudo encolar refresh dashboard stats tenant: %s", exc)
 
 

@@ -292,13 +292,13 @@ def get_reporte_local_stats(
     tenant_id: UUID,
     establishment_id: int,
 ) -> dict[str, Any]:
-    from app.modules.inventory.dashboard_establishment_stats_cache import get_establishment_stats_live
+    from app.modules.inventory.dashboard_establishment_stats_cache import get_establishment_stats
 
     est = db.get(m.InvEstablishment, establishment_id)
     if not est or est.tenant_id != tenant_id:
         raise ValueError("Local no encontrado")
 
-    return get_establishment_stats_live(db, tenant_id, establishment_id)
+    return get_establishment_stats(db, tenant_id, establishment_id)
 
 
 def _geo_description(db: Session, model: type, geo_id: str | None) -> str:

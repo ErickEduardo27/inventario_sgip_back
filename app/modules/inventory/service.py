@@ -234,6 +234,7 @@ def upsert_establishment(db: Session, tenant_id: UUID, body: EstablishmentWrite)
         row = db.get(m.InvEstablishment, body.id)
         if not row or row.tenant_id != tenant_id:
             raise ValueError("Establecimiento no encontrado")
+        old_code = row.code
         for f in (
             "description",
             "country_id",
@@ -256,11 +257,12 @@ def upsert_establishment(db: Session, tenant_id: UUID, body: EstablishmentWrite)
         db.add(row)
         db.commit()
         db.refresh(row)
-        from app.modules.inventory.dashboard_establishment_stats_cache import (
-            schedule_dashboard_establishment_stats_refresh,
-        )
+        if old_code != row.code:
+            from app.modules.inventory.dashboard_establishment_stats_cache import (
+                schedule_dashboard_establishment_stats_refresh,
+            )
 
-        schedule_dashboard_establishment_stats_refresh(tenant_id, [int(row.id)])
+            schedule_dashboard_establishment_stats_refresh(tenant_id, [int(row.id)])
         return row
     data = body.model_dump(exclude=_PHOTO_WRITE_EXCLUDE)
     row = m.InvEstablishment(tenant_id=tenant_id, **data)
@@ -987,21 +989,22 @@ def upsert_card(
         db.add(row)
         db.commit()
         db.refresh(row)
-        from app.modules.inventory.dashboard_establishment_stats_cache import (
-            schedule_dashboard_establishment_stats_refresh,
-        )
+        if old_ambiente_id != row.id_ambiente:
+            from app.modules.inventory.dashboard_establishment_stats_cache import (
+                schedule_dashboard_establishment_stats_refresh,
+            )
 
-        est_ids: list[int] = []
-        if row.id_ambiente:
-            new_env = db.get(m.InvEnvironment, row.id_ambiente)
-            if new_env and new_env.establishment_id:
-                est_ids.append(int(new_env.establishment_id))
-        if old_ambiente_id and old_ambiente_id != row.id_ambiente:
-            old_env = db.get(m.InvEnvironment, old_ambiente_id)
-            if old_env and old_env.establishment_id:
-                est_ids.append(int(old_env.establishment_id))
-        if est_ids:
-            schedule_dashboard_establishment_stats_refresh(tenant_id, est_ids)
+            est_ids: list[int] = []
+            if row.id_ambiente:
+                new_env = db.get(m.InvEnvironment, row.id_ambiente)
+                if new_env and new_env.establishment_id:
+                    est_ids.append(int(new_env.establishment_id))
+            if old_ambiente_id:
+                old_env = db.get(m.InvEnvironment, old_ambiente_id)
+                if old_env and old_env.establishment_id:
+                    est_ids.append(int(old_env.establishment_id))
+            if est_ids:
+                schedule_dashboard_establishment_stats_refresh(tenant_id, est_ids)
         return row
 
     if _hoj_num_taken(db, tenant_id, hoj_n):
