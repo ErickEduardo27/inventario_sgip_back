@@ -247,6 +247,52 @@ def schedule_item_cards_export(
     }
 
 
+def schedule_margesi_export(
+    db: Session,
+    *,
+    tenant_id: UUID,
+    q,
+    export_format: str = "csv",
+    created_by_id: UUID | None = None,
+) -> dict[str, Any]:
+    from app.tasks.csv_exports import export_margesi_csv_task
+
+    fmt = (export_format or "csv").strip().lower()
+    if fmt not in ("csv", "xlsx"):
+        fmt = "csv"
+
+    layout = (getattr(q, "export_layout", None) or "full").strip().lower()
+    if layout not in ("full", "report"):
+        layout = "full"
+    base = "margesi_reporte" if layout == "report" else "margesi_export"
+
+    job_id = uuid.uuid4()
+    ext = "xlsx" if fmt == "xlsx" else "csv"
+    filename = f"{base}_{date.today().isoformat()}.{ext}"
+    row = create_descarga_archivo(
+        db,
+        job_id=job_id,
+        tenant_id=tenant_id,
+        module="margesi",
+        filename=filename,
+        created_by_id=created_by_id,
+    )
+    db.commit()
+
+    query_dict = q.model_dump(mode="json")
+    task = export_margesi_csv_task.delay(str(job_id), str(tenant_id), query_dict, fmt)
+    set_celery_task_id(db, row, task.id)
+    db.commit()
+
+    label = "Excel" if fmt == "xlsx" else "CSV"
+    return {
+        "success": True,
+        "async_job": True,
+        "job_id": str(job_id),
+        "message": f"Exportación {label} de Margesi encolada. Consulte el estado para obtener el enlace de descarga.",
+    }
+
+
 def schedule_hoja_captura_export(
     db: Session,
     *,

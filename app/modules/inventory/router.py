@@ -35,7 +35,6 @@ from app.modules.inventory import reporte_locales_service as reporte_locales
 from app.modules.inventory import service as inv
 from app.modules.inventory.csv_export import csv_download_response
 from app.modules.inventory.export_queries import (
-    build_margesi_export_query,
     get_export_query,
 )
 from app.modules.inventory.schemas import (
@@ -1267,25 +1266,49 @@ def margesi_records(db: Session = Depends(get_db), tenant_id: UUID = Depends(get
     return PagedRows(data=rows, meta=PagedMeta(**inv.paged_meta(total, q.page, q.per_page)))
 
 
-@router.get("/margesi/export")
-def margesi_export(
+@router.post("/margesi/export", response_model=DescargaArchivoStartResponse)
+def margesi_export_start(
     db: Session = Depends(get_db),
     tenant_id: UUID = Depends(get_tenant_id),
+    user: User = Depends(require_permission("margesi", "export")),
     q: RecordQuery = Depends(_q),
-    _: User = Depends(require_permission("margesi", "export")),
+    export_format: Literal["csv", "xlsx"] = Query("csv", description="Formato del archivo: csv o xlsx"),
 ):
-    """Export CSV de margesi; acepta ``search`` e ``inv_sit_filter`` como el listado (COPY en PostgreSQL)."""
-    try:
-        inner_sql, params, filename_base = build_margesi_export_query(tenant_id, q)
-        return csv_download_response(
+    """Encola exportación Margesi: Celery genera CSV/XLSX, lo sube a GCS y guarda URL en ``descarga_archivos``."""
+    return DescargaArchivoStartResponse(
+        **dl_svc.schedule_margesi_export(
             db,
             tenant_id=tenant_id,
-            inner_sql=inner_sql,
-            filename_base=filename_base,
-            params=params,
-        )
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail=f"Error al exportar CSV: {exc}") from exc
+            q=q,
+            export_format=export_format,
+            created_by_id=user.id,
+        ),
+    )
+
+
+@router.get("/margesi/export")
+def margesi_export_get_not_allowed():
+    """Evita el GET síncrono (Cloud Run corta el CSV grande y el navegador lo ve como CORS)."""
+    raise HTTPException(
+        status_code=405,
+        detail=(
+            "La exportación de Margesi es asíncrona. Use POST /api/inventory/margesi/export "
+            "para encolar el trabajo y consulte GET /margesi/export/{job_id} para el estado."
+        ),
+    )
+
+
+@router.get("/margesi/export/{job_id}", response_model=DescargaArchivoStatus)
+def margesi_export_status(
+    job_id: UUID,
+    db: Session = Depends(get_db),
+    tenant_id: UUID = Depends(get_tenant_id),
+    _: User = Depends(require_permission("margesi", "export")),
+):
+    try:
+        return DescargaArchivoStatus(**dl_svc.get_descarga_archivo_status(db, job_id, tenant_id))
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @router.get("/margesi/{row_id}")
@@ -1867,6 +1890,7 @@ def descarga_archivo_file(
         "reporte_locales": ("reporte_locales", "view"),
         "item_cards": ("bienes", "export"),
         "hoja_captura": ("hoja_captura", "export"),
+        "margesi": ("margesi", "export"),
     }.get(row.module)
     if module_perm is None:
         raise HTTPException(status_code=404, detail="Archivo no disponible")
