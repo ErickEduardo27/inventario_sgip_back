@@ -298,7 +298,7 @@ def get_reporte_local_stats(
     if not est or est.tenant_id != tenant_id:
         raise ValueError("Local no encontrado")
 
-    return get_establishment_stats(db, tenant_id, establishment_id)
+    return get_establishment_stats(db, tenant_id, establishment_id, live=True)
 
 
 def _geo_description(db: Session, model: type, geo_id: str | None) -> str:
