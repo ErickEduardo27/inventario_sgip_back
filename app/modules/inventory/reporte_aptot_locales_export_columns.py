@@ -11,19 +11,38 @@ REPORTE_APTOT_LOCALES_EXPORT_COLUMNS_SQL = f"""
             COALESCE(to_char(aptot.hoj_fec, 'YYYY-MM-DD'), '') AS "F.Captura",
             COALESCE(EXTRACT(YEAR FROM aptot.hoj_fec)::text, '') AS "F.C. Año",
             COALESCE(aptot.area_code, '') AS "Codigo Area",
-            COALESCE(aptot.area_description, '') AS "Area",
-            COALESCE(aptot.local_departamento, '') AS "Departamento",
+            COALESCE(
+                NULLIF(TRIM(COALESCE(aptot.area_description, '')), ''),
+                COALESCE(aptot.margesi_area, '')
+            ) AS "Area",
+            COALESCE(
+                NULLIF(TRIM(COALESCE(aptot.local_departamento, '')), ''),
+                COALESCE(aptot.margesi_departamento, '')
+            ) AS "Departamento",
             COALESCE(aptot.local_code, '') AS "Codigo Local",
-            COALESCE(aptot.local_description, '') AS "Local",
+            COALESCE(
+                NULLIF(TRIM(COALESCE(aptot.local_description, '')), ''),
+                COALESCE(aptot.margesi_local, '')
+            ) AS "Local",
             COALESCE(aptot.ambiente_piso::text, '') AS "Piso",
             COALESCE(aptot.ambiente_piso_des::text, '') AS "Piso D.",
             COALESCE(aptot.ambiente_code, '') AS "Codigo Ambiente",
-            COALESCE(aptot.ambiente_description, '') AS "Ambiente",
+            COALESCE(
+                NULLIF(TRIM(COALESCE(aptot.ambiente_description, '')), ''),
+                COALESCE(aptot.margesi_ambiente, '')
+            ) AS "Ambiente",
             COALESCE(aptot.usuario_code::text, '') AS "Codigo Usuario",
-            COALESCE(aptot.usuario, '') AS "Apellidos y Nombres",
+            COALESCE(
+                NULLIF(TRIM(COALESCE(aptot.usuario, '')), ''),
+                COALESCE(aptot.margesi_usuario, '')
+            ) AS "Apellidos y Nombres",
             COALESCE(aptot.inv_num_1::text, '') AS "Inv. 1",
             COALESCE(aptot.inv_num_2::text, '') AS "Inv. 2",
-            COALESCE(aptot.inv_num::text, '') AS "Eti. Física",
+            COALESCE(
+                NULLIF(TRIM(COALESCE(aptot.inv_num::text, '')), ''),
+                NULLIF(TRIM(COALESCE(aptot.margesi_inv_num::text, '')), ''),
+                ''
+            ) AS "Eti. Física",
             COALESCE(aptot.mar_num, '') AS "Codigo Interno",
             COALESCE(aptot.mar_sit_conta, '') AS "Sit. Contable",
             COALESCE(aptot.inv_con, '') AS "Ubi",
@@ -38,15 +57,30 @@ REPORTE_APTOT_LOCALES_EXPORT_COLUMNS_SQL = f"""
                 NULLIF(TRIM(COALESCE(aptot.margesi_sbn, '')), ''),
                 ''
             ) AS "SBN",
-            COALESCE(aptot.mar_des, '') AS "Descripcion",
+            COALESCE(
+                NULLIF(TRIM(COALESCE(aptot.mar_des, '')), ''),
+                COALESCE(aptot.margesi_description, '')
+            ) AS "Descripcion",
             COALESCE(aptot.mar_esp, '') AS "Especificaciones",
             COALESCE(aptot.mar_est::text, '') AS "Est",
             COALESCE(aptot.mar_uso::text, '') AS "Uso",
             COALESCE(aptot.mar_col, '') AS "Color",
-            COALESCE(aptot.mar_mar, '') AS "Marca",
-            COALESCE(aptot.mar_mod, '') AS "Modelo",
-            COALESCE(aptot.mar_tip, '') AS "Tipo",
-            COALESCE(aptot.mar_ser, '') AS "Serie",
+            COALESCE(
+                NULLIF(TRIM(COALESCE(aptot.mar_mar, '')), ''),
+                COALESCE(aptot.margesi_marca, '')
+            ) AS "Marca",
+            COALESCE(
+                NULLIF(TRIM(COALESCE(aptot.mar_mod, '')), ''),
+                COALESCE(aptot.margesi_modelo, '')
+            ) AS "Modelo",
+            COALESCE(
+                NULLIF(TRIM(COALESCE(aptot.mar_tip, '')), ''),
+                COALESCE(aptot.margesi_tipo, '')
+            ) AS "Tipo",
+            COALESCE(
+                NULLIF(TRIM(COALESCE(aptot.mar_ser, '')), ''),
+                COALESCE(aptot.margesi_serie, '')
+            ) AS "Serie",
             COALESCE(aptot.mar_med, '') AS "Medidas",
             COALESCE(aptot.mar_npla, '') AS "Placa",
             COALESCE(aptot.mar_nmot, '') AS "Motor",
