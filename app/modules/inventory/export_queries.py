@@ -300,6 +300,14 @@ _ITEM_CARDS_EXPORT_SELECT = f"""
             COALESCE(ic.extra->>'mar_mod', '') AS modelo,
             COALESCE(ic.extra->>'mar_tip', '') AS tipo,
             COALESCE(ic.extra->>'mar_ser', '') AS serie,
+            COALESCE(
+                NULLIF(TRIM(COALESCE(ic.extra->>'mar_med', '')), ''),
+                COALESCE(ic.extra->>'medidas', '')
+            ) AS medidas,
+            COALESCE(
+                NULLIF(TRIM(COALESCE(ic.extra->>'mar_obs', '')), ''),
+                COALESCE(ic.extra->>'observacion_bien', '')
+            ) AS observaciones,
             COALESCE(ic.inv_num_1, '') AS inv_num_1,
             COALESCE(ic.inv_num_2, '') AS inv_num_2,
             COALESCE(u_inv.full_name, '') AS inventariador,

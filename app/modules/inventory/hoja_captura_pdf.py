@@ -680,7 +680,7 @@ def generate_ficha_pdf(db: Session, tenant_id: UUID, card_id: int) -> tuple[byte
         db.scalars(
             select(m.InvItemCard)
             .where(m.InvItemCard.tenant_id == tenant_id, m.InvItemCard.id_card == card.id)
-            .order_by(m.InvItemCard.id)
+            .order_by(m.InvItemCard.inv_num.asc(), m.InvItemCard.id.asc())
         ).all()
     )
 
