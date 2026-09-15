@@ -101,7 +101,10 @@ SELECT
     itc.id AS source_ref_id,
     :refreshed_at AS refreshed_at,
     itc.id AS itemcard_id,
-    itc.mar_sit_conta,
+    COALESCE(
+        NULLIF(TRIM(COALESCE(itc.mar_sit_conta, '')), ''),
+        NULLIF(TRIM(COALESCE(ma.mar_sit_conta, '')), '')
+    ) AS mar_sit_conta,
     itc.mar_cpat,
     itc.inv_sit AS state,
     itc.inv_sit,
@@ -304,7 +307,10 @@ SELECT
     itc.id AS source_ref_id,
     NOW() AT TIME ZONE 'UTC' AS refreshed_at,
     itc.id AS itemcard_id,
-    itc.mar_sit_conta,
+    COALESCE(
+        NULLIF(TRIM(COALESCE(itc.mar_sit_conta, '')), ''),
+        NULLIF(TRIM(COALESCE(ma.mar_sit_conta, '')), '')
+    ) AS mar_sit_conta,
     itc.mar_cpat,
     CASE
         WHEN ee.id IS DISTINCT FROM %s THEN 'CR'
