@@ -6,13 +6,25 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_current_user, get_tenant_id
 from app.core.exceptions import AppError
 from app.db.session import get_db
-from app.modules.auth.schemas import LoginRequest, LoginResponse, ProfileUpdate, SessionOut
+from app.modules.auth.schemas import LoginRequest, LoginResponse, ProfileUpdate, SessionOut, TenantChoicesOut
 from app.modules.auth.service import AuthService
 from app.modules.iam.models import User
 from app.modules.iam.schemas import UserOut
 from app.modules.iam.service import ComponentService
 
 router = APIRouter()
+
+
+@router.post("/tenants", response_model=TenantChoicesOut)
+def discover_tenants(
+    body: LoginRequest,
+    db: Session = Depends(get_db),
+):
+    """Lista los tenants del usuario. Si hay varios, la app deja elegir uno."""
+    try:
+        return AuthService(db).discover_tenants(body)
+    except AppError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.message) from e
 
 
 @router.post("/login", response_model=LoginResponse)

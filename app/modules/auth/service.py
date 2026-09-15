@@ -7,15 +7,52 @@ from sqlalchemy.orm import Session
 from app.core.exceptions import AppError
 from app.core.jwt import encode_access_token
 from app.core.security import hash_password, verify_password
-from app.modules.auth.schemas import LoginRequest, LoginResponse, ProfileUpdate
+from app.modules.auth.schemas import LoginRequest, LoginResponse, ProfileUpdate, TenantChoiceOut, TenantChoicesOut
 from app.modules.iam.models import User
 from app.modules.iam.schemas import UserOut
+from app.modules.settings.service import SettingsService
+from app.modules.tenants.models import Tenant
+from app.modules.tenants.theme import parse_theme
 from app.shared.utils.strings import normalize_email
 
 
 class AuthService:
     def __init__(self, db: Session) -> None:
         self.db = db
+
+    def discover_tenants(self, body: LoginRequest) -> TenantChoicesOut:
+        """Tenants donde el correo+clave coinciden. Público, sin X-Tenant-Slug."""
+        email = normalize_email(body.email)
+        users = self.db.scalars(
+            select(User).where(
+                User.email == email,
+                User.is_deleted.is_(False),
+                User.status == "active",
+            )
+        ).all()
+        choices: list[TenantChoiceOut] = []
+        settings = SettingsService(self.db)
+        for user in users:
+            if not verify_password(body.password, user.password_hash):
+                continue
+            tenant = self.db.get(Tenant, user.tenant_id)
+            if not tenant or tenant.status != "active":
+                continue
+            workspace = settings.get_settings(tenant.id)
+            theme = parse_theme(workspace.portal_branding, logo_url=workspace.logo_url)
+            choices.append(
+                TenantChoiceOut(
+                    id=tenant.id,
+                    slug=tenant.slug,
+                    name=tenant.name,
+                    status=tenant.status,
+                    theme=theme,
+                )
+            )
+        if not choices:
+            raise AppError("Credenciales inválidas", 401)
+        choices.sort(key=lambda t: t.name.lower())
+        return TenantChoicesOut(tenants=choices)
 
     def login(self, tenant_id: UUID, body: LoginRequest) -> LoginResponse:
         email = normalize_email(body.email)

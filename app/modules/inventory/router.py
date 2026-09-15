@@ -29,6 +29,7 @@ from app.modules.inventory import import_common as imp_common
 from app.modules.inventory import geo_catalog as geo
 from app.modules.inventory import models as inv_models
 from app.modules.inventory.attendance_router import router as attendance_router
+from app.modules.inventory.mobile_router import router as mobile_router
 from app.modules.inventory import reporte_locales_cronograma_import as rl_cronograma_import
 from app.modules.inventory import reporte_locales_download_service as reporte_locales_dl
 from app.modules.inventory import reporte_locales_service as reporte_locales
@@ -99,6 +100,7 @@ from app.modules.inventory.schemas import (
 
 router = APIRouter(prefix="/inventory", tags=["inventory"])
 router.include_router(attendance_router)
+router.include_router(mobile_router)
 
 
 def _csv_export_route(module: str, permission_code: str):

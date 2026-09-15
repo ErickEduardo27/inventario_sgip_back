@@ -1,11 +1,26 @@
+from uuid import UUID
+
 from pydantic import BaseModel, Field, model_validator
 
 from app.modules.iam.schemas import UserComponentOut, UserOut
+from app.modules.tenants.theme import TenantThemeOut
 
 
 class LoginRequest(BaseModel):
     email: str = Field(min_length=3, max_length=200)
     password: str = Field(min_length=1, max_length=128)
+
+
+class TenantChoiceOut(BaseModel):
+    id: UUID
+    slug: str
+    name: str
+    status: str
+    theme: TenantThemeOut
+
+
+class TenantChoicesOut(BaseModel):
+    tenants: list[TenantChoiceOut]
 
 
 class LoginResponse(BaseModel):

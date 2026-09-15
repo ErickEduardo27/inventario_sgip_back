@@ -44,19 +44,22 @@ REPORTE_APTOT_LOCALES_EXPORT_COLUMNS_SQL = f"""
                 ''
             ) AS "Eti. Física",
             COALESCE(aptot.mar_num, '') AS "Codigo Interno",
-            COALESCE(aptot.mar_sit_conta, '') AS "Sit. Contable",
+            COALESCE(aptot.inv_sit, '') AS "Sit. Contable",
             COALESCE(aptot.inv_con, '') AS "Ubi",
             COALESCE(
                 NULLIF(TRIM(COALESCE(aptot.margesi_inv_num::text, '')), ''),
                 NULLIF(TRIM(COALESCE(aptot.inv_num::text, '')), ''),
                 ''
             ) AS "Inv. Num",
-            COALESCE(
-                NULLIF(TRIM(COALESCE(aptot.mar_ccat, '')), ''),
-                NULLIF(TRIM(COALESCE(aptot.mar_cpat, '')), ''),
-                NULLIF(TRIM(COALESCE(aptot.margesi_sbn, '')), ''),
-                ''
-            ) AS "SBN",
+            CASE
+                WHEN aptot.source_kind = 'faltante' THEN COALESCE(aptot.mar_cpat, '')
+                ELSE COALESCE(
+                    NULLIF(TRIM(COALESCE(aptot.mar_ccat, '')), ''),
+                    NULLIF(TRIM(COALESCE(aptot.mar_cpat, '')), ''),
+                    NULLIF(TRIM(COALESCE(aptot.margesi_sbn, '')), ''),
+                    ''
+                )
+            END AS "SBN",
             COALESCE(
                 NULLIF(TRIM(COALESCE(aptot.mar_des, '')), ''),
                 COALESCE(aptot.margesi_description, '')
@@ -95,9 +98,18 @@ REPORTE_APTOT_LOCALES_EXPORT_COLUMNS_SQL = f"""
             COALESCE(aptot.valor_margesi::text, '') AS "Valor",
             COALESCE(aptot.margesi_sbn, '') AS "SBN.Margesi",
             COALESCE(aptot.margesi_area, '') AS "Area Margesi",
-            COALESCE(aptot.margesi_departamento, '') AS "Departamento Margesi",
-            COALESCE(aptot.margesi_local, '') AS "Local Margesi",
-            COALESCE(aptot.margesi_ambiente, '') AS "Ambiente Margesi",
+            CASE
+                WHEN UPPER(TRIM(COALESCE(aptot.inv_sit, ''))) = 'S' THEN ''
+                ELSE COALESCE(aptot.margesi_departamento, '')
+            END AS "Departamento Margesi",
+            CASE
+                WHEN UPPER(TRIM(COALESCE(aptot.inv_sit, ''))) = 'S' THEN ''
+                ELSE COALESCE(aptot.margesi_local, '')
+            END AS "Local Margesi",
+            CASE
+                WHEN UPPER(TRIM(COALESCE(aptot.inv_sit, ''))) = 'S' THEN ''
+                ELSE COALESCE(aptot.margesi_ambiente, '')
+            END AS "Ambiente Margesi",
             COALESCE(aptot.margesi_usuario, '') AS "Usuario Margesi",
             COALESCE(aptot.margesi_description, '') AS "Descripcion Margesi",
             COALESCE(aptot.margesi_marca, '') AS "Marca Margesi",
