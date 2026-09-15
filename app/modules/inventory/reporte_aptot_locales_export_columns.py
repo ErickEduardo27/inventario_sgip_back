@@ -44,7 +44,12 @@ REPORTE_APTOT_LOCALES_EXPORT_COLUMNS_SQL = f"""
                 ''
             ) AS "Eti. Física",
             COALESCE(aptot.mar_num, '') AS "Codigo Interno",
-            COALESCE(aptot.inv_sit, '') AS "Sit. Contable",
+            CASE
+                WHEN aptot.source_kind = 'faltante'
+                     OR UPPER(TRIM(COALESCE(aptot.inv_sit, ''))) = 'C'
+                THEN COALESCE(aptot.mar_sit_conta, '')
+                ELSE COALESCE(aptot.inv_sit, '')
+            END AS "Sit. Contable",
             COALESCE(aptot.inv_con, '') AS "Ubi",
             COALESCE(
                 NULLIF(TRIM(COALESCE(aptot.margesi_inv_num::text, '')), ''),
