@@ -1780,9 +1780,17 @@ def reporte_aptot_export_start(
     db: Session = Depends(get_db),
     tenant_id: UUID = Depends(get_tenant_id),
     user: User = Depends(require_permission("reporte_aptot", "export")),
+    export_format: Literal["csv", "xlsx"] = Query("csv", description="Formato del archivo: csv o xlsx"),
 ):
-    """Encola exportación APTOT: Celery genera CSV, lo sube a GCS y guarda URL en ``descarga_archivos``."""
-    return DescargaArchivoStartResponse(**dl_svc.schedule_reporte_aptot_export(db, tenant_id=tenant_id, created_by_id=user.id))
+    """Encola exportación APTOT: Celery genera CSV/Excel, lo sube a GCS y guarda URL en ``descarga_archivos``."""
+    return DescargaArchivoStartResponse(
+        **dl_svc.schedule_reporte_aptot_export(
+            db,
+            tenant_id=tenant_id,
+            export_format=export_format,
+            created_by_id=user.id,
+        )
+    )
 
 
 @router.get("/reporte-aptot/export/{job_id}", response_model=DescargaArchivoStatus)

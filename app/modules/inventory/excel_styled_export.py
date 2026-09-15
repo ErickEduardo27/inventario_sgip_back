@@ -41,6 +41,23 @@ BIENES_INVENTARIADOS_COLUMN_FORMATS: dict[str, ColumnFormat] = {
     "fecha_creacion": "datetime",
 }
 
+# Perfil: reporte APTOT (cache)
+REPORTE_APTOT_COLUMN_FORMATS: dict[str, ColumnFormat] = {
+    "hoj_num": "integer",
+    "hoj fec": "date",
+    "hoj_fec": "date",
+    "fecha margesi": "date",
+    "fecha_margesi": "date",
+    "valor margesi": "currency_pen",
+    "valor_margesi": "currency_pen",
+    "item created at": "datetime",
+    "item_created_at": "datetime",
+    "item updated at": "datetime",
+    "item_updated_at": "datetime",
+    "refreshed at": "datetime",
+    "refreshed_at": "datetime",
+}
+
 _DEFAULT_HEADER_COLOR = "2474F5"
 _HEADER_FONT = Font(bold=True, color="FFFFFF", size=11)
 _HEADER_ALIGN = Alignment(horizontal="center", vertical="center", wrap_text=True)

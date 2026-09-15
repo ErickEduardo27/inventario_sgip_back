@@ -23,25 +23,52 @@ def _progress_meta(progress: int, message: str) -> dict:
 
 
 @celery_app.task(bind=True, name="export.reporte_aptot_csv")
-def export_reporte_aptot_csv_task(self, job_id: str, tenant_id: str) -> dict:
+def export_reporte_aptot_csv_task(self, job_id: str, tenant_id: str, export_format: str = "csv") -> dict:
     job_uuid = UUID(job_id)
     tenant_uuid = UUID(tenant_id)
+    fmt = (export_format or "csv").strip().lower()
+    if fmt not in ("csv", "xlsx"):
+        fmt = "csv"
 
     try:
         with SessionLocal() as db:
             row = dl_svc.get_descarga_archivo(db, job_uuid, tenant_uuid)
             if row is None:
                 return {"success": False, "message": "Trabajo de descarga no encontrado"}
-            dl_svc.mark_processing(db, row)
+            dl_svc.mark_processing(
+                db,
+                row,
+                message="Generando Excel…" if fmt == "xlsx" else "Generando CSV…",
+            )
             db.commit()
+            filename = row.filename or (
+                f"reporte_aptot_export_{date.today().isoformat()}"
+                f"{'.xlsx' if fmt == 'xlsx' else '.csv'}"
+            )
 
-        self.update_state(state="PROGRESS", meta=_progress_meta(10, "Generando CSV…"))
+        self.update_state(
+            state="PROGRESS",
+            meta=_progress_meta(10, "Generando Excel…" if fmt == "xlsx" else "Generando CSV…"),
+        )
 
-        inner_sql, filename_base = get_export_query("reporte_aptot")
-        stamp = date.today().isoformat()
-        filename = f"{filename_base}_{stamp}.csv"
+        inner_sql, _filename_base = get_export_query("reporte_aptot")
         payload = copy_query_to_csv_bytes(inner_sql, (str(tenant_uuid),))
-        content = b"\xef\xbb\xbf" + payload
+        if fmt == "xlsx":
+            self.update_state(state="PROGRESS", meta=_progress_meta(45, "Convirtiendo a Excel…"))
+            from app.modules.inventory.excel_styled_export import (
+                REPORTE_APTOT_COLUMN_FORMATS,
+                csv_bytes_to_styled_xlsx_bytes,
+            )
+            from app.modules.tenants.theme import primary_hex_openpyxl
+
+            content = csv_bytes_to_styled_xlsx_bytes(
+                payload,
+                column_formats=REPORTE_APTOT_COLUMN_FORMATS,
+                sheet_title="Reporte APTOT",
+                header_color_hex=primary_hex_openpyxl(tenant_uuid),
+            )
+        else:
+            content = b"\xef\xbb\xbf" + payload
 
         self.update_state(
             state="PROGRESS",
