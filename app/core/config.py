@@ -125,6 +125,14 @@ class Settings(BaseSettings):
         default="item-photos",
         description="Prefijo GCS para fotos de bienes en hoja de captura.",
     )
+    gcs_person_photos_prefix: str = Field(
+        default="person-photos",
+        description="Prefijo GCS para fotos de personas.",
+    )
+    gcs_margesi_photos_prefix: str = Field(
+        default="margesi-photos",
+        description="Prefijo GCS para fotos de bienes margesi (patrimonio).",
+    )
     gcs_local_fotos_prefix: str = Field(
         default="local-fotos",
         validation_alias=AliasChoices("GCS_LOCAL_FOTOS"),

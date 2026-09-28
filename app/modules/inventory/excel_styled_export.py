@@ -139,12 +139,21 @@ def _parse_datetime(value: str) -> datetime | None:
         except ValueError:
             continue
     try:
-        parsed = pd.to_datetime(raw, dayfirst=True, errors="coerce")
+        parsed = pd.to_datetime(raw, dayfirst=True, errors="coerce", utc=False)
         if pd.isna(parsed):
             return None
-        return parsed.to_pydatetime()
+        dt = parsed.to_pydatetime()
+        # openpyxl / Excel no admiten datetime con tzinfo
+        if isinstance(dt, datetime) and dt.tzinfo is not None:
+            dt = dt.replace(tzinfo=None)
+        return dt
     except (ValueError, TypeError):
         return None
+
+
+def _excel_safe_datetime(value: datetime) -> datetime:
+    """Excel no soporta zonas horarias en celdas datetime."""
+    return value.replace(tzinfo=None) if value.tzinfo is not None else value
 
 
 def _coerce_value(raw: object, fmt: ColumnFormat) -> tuple[Any, ColumnFormat]:
@@ -178,7 +187,9 @@ def _coerce_value(raw: object, fmt: ColumnFormat) -> tuple[Any, ColumnFormat]:
 
     if fmt == "datetime":
         parsed = _parse_datetime(text)
-        return (parsed if parsed is not None else text), ("datetime" if parsed is not None else "text")
+        if parsed is None:
+            return text, "text"
+        return _excel_safe_datetime(parsed), "datetime"
 
     return text, "text"
 
@@ -208,6 +219,7 @@ def _populate_styled_sheet(
     *,
     header_color_hex: str | None = None,
     preserve_header_labels: bool = False,
+    zebra_rows: bool = True,
 ) -> None:
     headers = [str(h) for h in df.columns.tolist()]
     if not headers:
@@ -249,7 +261,7 @@ def _populate_styled_sheet(
                 cell.number_format = EXCEL_NUMBER_FORMATS[fmt]
             cell.alignment = _DATA_ALIGN
             cell.border = _THIN_BORDER
-            if row_idx % 2 == 1:
+            if zebra_rows and row_idx % 2 == 1:
                 cell.fill = _ZEBRA_FILL
 
     for col_idx, display_header in enumerate(display_headers, start=1):
@@ -265,16 +277,26 @@ def csv_bytes_to_styled_xlsx_bytes(
     column_formats: dict[str, ColumnFormat] | None = None,
     sheet_title: str = "Exportación",
     header_color_hex: str | None = None,
+    zebra_rows: bool = True,
 ) -> bytes:
     """Genera Excel con encabezado estilizado y formatos numéricos/fecha/moneda/texto."""
     profiles = column_formats or {}
     text = csv_payload.decode("utf-8-sig", errors="replace")
     df = pd.read_csv(io.StringIO(text), dtype=str, keep_default_na=False)
+    # Cabeceras legibles: guiones bajos → espacios
+    df.columns = [_format_display_header(str(c).replace("_", " ")) for c in df.columns]
 
     wb = Workbook()
     ws = wb.active
     ws.title = sheet_title[:31]
-    _populate_styled_sheet(ws, df, profiles, header_color_hex=header_color_hex)
+    _populate_styled_sheet(
+        ws,
+        df,
+        profiles,
+        header_color_hex=header_color_hex,
+        preserve_header_labels=True,
+        zebra_rows=zebra_rows,
+    )
 
     out = io.BytesIO()
     wb.save(out)

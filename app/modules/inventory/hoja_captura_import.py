@@ -240,15 +240,15 @@ def bulk_import_hoja_captura_items(
                             continue
                         body.id = int(existing.id)
 
-                    ok, msg = store_card_item(
+                    result = store_card_item(
                         db,
                         tenant_id,
                         int(card.id),
                         body,
                         operator_id=operator_id if not body.id else None,
                     )
-                    if not ok:
-                        errors.append(f"Hoja {hoj_num} / {body.inv_num}: {msg}")
+                    if not result.ok:
+                        errors.append(f"Hoja {hoj_num} / {body.inv_num}: {result.message}")
                         if len(errors) >= 200:
                             break
                         skipped += 1
@@ -259,7 +259,7 @@ def bulk_import_hoja_captura_items(
                         updated += 1
                     else:
                         inserted += 1
-                        inv_key = body.inv_num
+                        inv_key = result.inv_num if result.inv_num is not None else body.inv_num
                         if inv_key is not None:
                             fresh = db.scalar(
                                 select(m.InvItemCard).where(

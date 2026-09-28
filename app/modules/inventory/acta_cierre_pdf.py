@@ -25,6 +25,25 @@ FONT = "Helvetica"
 FONT_BOLD = "Helvetica-Bold"
 BORDER = 0.75
 LINE_COLOR = colors.HexColor("#333333")
+DEFAULT_HEADER_HEX = "#2474F5"
+
+
+def _tint_hex(hex_color: str, *, white_mix: float = 0.82) -> colors.Color:
+    """Mezcla el color del tenant con blanco para encabezados legibles."""
+    raw = str(hex_color or DEFAULT_HEADER_HEX).strip().lstrip("#")
+    if len(raw) != 6:
+        raw = DEFAULT_HEADER_HEX.lstrip("#")
+    try:
+        r = int(raw[0:2], 16)
+        g = int(raw[2:4], 16)
+        b = int(raw[4:6], 16)
+    except ValueError:
+        r, g, b = 36, 116, 245
+    mix = min(max(white_mix, 0.0), 1.0)
+    r = int(r + (255 - r) * mix)
+    g = int(g + (255 - g) * mix)
+    b = int(b + (255 - b) * mix)
+    return colors.Color(r / 255.0, g / 255.0, b / 255.0)
 
 _SPANISH_MONTHS = (
     "enero",
@@ -121,12 +140,74 @@ def _styles() -> dict[str, ParagraphStyle]:
             leading=12,
             alignment=TA_CENTER,
         ),
+        "cell": ParagraphStyle(
+            "acta_cell",
+            parent=base["Normal"],
+            fontName=FONT,
+            fontSize=9,
+            leading=11,
+            alignment=TA_LEFT,
+            wordWrap="CJK",
+        ),
+        "cell_bold": ParagraphStyle(
+            "acta_cell_bold",
+            parent=base["Normal"],
+            fontName=FONT_BOLD,
+            fontSize=9,
+            leading=11,
+            alignment=TA_LEFT,
+            wordWrap="CJK",
+        ),
+        "cell_center": ParagraphStyle(
+            "acta_cell_center",
+            parent=base["Normal"],
+            fontName=FONT,
+            fontSize=9,
+            leading=11,
+            alignment=TA_CENTER,
+            wordWrap="CJK",
+        ),
+        "sign_label": ParagraphStyle(
+            "acta_sign_label",
+            parent=base["Normal"],
+            fontName=FONT,
+            fontSize=8,
+            leading=10,
+            alignment=TA_LEFT,
+            wordWrap="CJK",
+        ),
+        "sign_value": ParagraphStyle(
+            "acta_sign_value",
+            parent=base["Normal"],
+            fontName=FONT,
+            fontSize=9,
+            leading=11,
+            alignment=TA_LEFT,
+            wordWrap="CJK",
+        ),
+        "sign_header": ParagraphStyle(
+            "acta_sign_header",
+            parent=base["Normal"],
+            fontName=FONT_BOLD,
+            fontSize=9,
+            leading=11,
+            alignment=TA_CENTER,
+        ),
+        "sign_footer": ParagraphStyle(
+            "acta_sign_footer",
+            parent=base["Normal"],
+            fontName=FONT,
+            fontSize=8,
+            leading=10,
+            alignment=TA_CENTER,
+        ),
     }
 
 
 def generate_acta_cierre_pdf(payload: dict[str, Any]) -> tuple[bytes, str]:
     """Genera bytes PDF y nombre de archivo a partir de datos ya resueltos."""
     st = _styles()
+    header_bg = _tint_hex(str(payload.get("primary_hex") or DEFAULT_HEADER_HEX))
     code = _cell(payload.get("establishment_code"))
     description = _cell(payload.get("establishment_description"))
     day, month, year = _format_acta_date(payload.get("fecha"))
@@ -169,8 +250,18 @@ def generate_acta_cierre_pdf(payload: dict[str, Any]) -> tuple[bytes, str]:
 
     geo_table = Table(
         [
-            ["Macroregión", "Departamento", "Provincia", "Distrito"],
-            [_esc(macro), _esc(dept), _esc(prov), _esc(dist)],
+            [
+                Paragraph("Macroregión", st["cell_bold"]),
+                Paragraph("Departamento", st["cell_bold"]),
+                Paragraph("Provincia", st["cell_bold"]),
+                Paragraph("Distrito", st["cell_bold"]),
+            ],
+            [
+                Paragraph(_esc(macro), st["cell_center"]),
+                Paragraph(_esc(dept), st["cell_center"]),
+                Paragraph(_esc(prov), st["cell_center"]),
+                Paragraph(_esc(dist), st["cell_center"]),
+            ],
         ],
         colWidths=[CONTENT_W * 0.25] * 4,
     )
@@ -183,7 +274,7 @@ def generate_acta_cierre_pdf(payload: dict[str, Any]) -> tuple[bytes, str]:
                 ("ALIGN", (0, 0), (-1, -1), "CENTER"),
                 ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
                 ("GRID", (0, 0), (-1, -1), BORDER, LINE_COLOR),
-                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#F5E6D3")),
+                ("BACKGROUND", (0, 0), (-1, 0), header_bg),
                 ("TOPPADDING", (0, 0), (-1, -1), 5),
                 ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
             ]
@@ -215,41 +306,56 @@ def generate_acta_cierre_pdf(payload: dict[str, Any]) -> tuple[bytes, str]:
     )
 
     stats_rows = [
-        ["Conceptos", "Cantidad", "Observaciones"],
-        ["Total bienes registrados en BD del Banco de la Nación", str(total_bd), ""],
         [
-            "Bienes Conforme",
-            str(conforme),
-            "Bienes registrados en la base de datos de la sede ubicados",
+            Paragraph("Conceptos", st["cell_bold"]),
+            Paragraph("Cantidad", st["cell_bold"]),
+            Paragraph("Observaciones", st["cell_bold"]),
         ],
         [
-            "Bienes Faltantes",
-            str(faltantes),
-            "Bienes registrados en la base de datos de la sede no ubicados.",
+            Paragraph("Total bienes registrados en BD del Banco de la Nación (Margesi)", st["cell"]),
+            Paragraph(str(total_bd), st["cell_center"]),
+            Paragraph("", st["cell"]),
         ],
         [
-            "Bienes Sobrantes",
-            str(sobrantes),
-            "Bienes no registrados en la base de datos de la sede ubicados",
+            Paragraph("Bienes Conforme (Margesi conciliados)", st["cell"]),
+            Paragraph(str(conforme), st["cell_center"]),
+            Paragraph("Bienes registrados en la base de datos de la sede ubicados", st["cell"]),
         ],
-        ["Total de Bienes Inventariados", str(total_inv), ""],
+        [
+            Paragraph("Bienes Faltantes (Margesi faltantes)", st["cell"]),
+            Paragraph(str(faltantes), st["cell_center"]),
+            Paragraph("Bienes registrados en la base de datos de la sede no ubicados.", st["cell"]),
+        ],
+        [
+            Paragraph("Bienes Sobrantes (Inventario sobrantes)", st["cell"]),
+            Paragraph(str(sobrantes), st["cell_center"]),
+            Paragraph("Bienes no registrados en la base de datos de la sede ubicados", st["cell"]),
+        ],
+        [
+            Paragraph("Total de Bienes Inventariados (Conforme + Sobrantes)", st["cell"]),
+            Paragraph(str(total_inv), st["cell_center"]),
+            Paragraph("", st["cell"]),
+        ],
     ]
+    # Anchos fijos para forzar wrap (evitar desborde de Observaciones).
+    col_conceptos = CONTENT_W * 0.40
+    col_cantidad = CONTENT_W * 0.12
+    col_obs = CONTENT_W * 0.48
     stats_table = Table(
         stats_rows,
-        colWidths=[CONTENT_W * 0.42, CONTENT_W * 0.12, CONTENT_W * 0.46],
+        colWidths=[col_conceptos, col_cantidad, col_obs],
     )
     stats_table.setStyle(
         TableStyle(
             [
                 ("FONTNAME", (0, 0), (-1, 0), FONT_BOLD),
-                ("FONTNAME", (0, 1), (-1, -1), FONT),
                 ("FONTSIZE", (0, 0), (-1, -1), 9),
                 ("ALIGN", (1, 0), (1, -1), "CENTER"),
                 ("VALIGN", (0, 0), (-1, -1), "TOP"),
                 ("GRID", (0, 0), (-1, -1), BORDER, LINE_COLOR),
-                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#F5E6D3")),
-                ("TOPPADDING", (0, 0), (-1, -1), 4),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+                ("BACKGROUND", (0, 0), (-1, 0), header_bg),
+                ("TOPPADDING", (0, 0), (-1, -1), 5),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
                 ("LEFTPADDING", (0, 0), (-1, -1), 4),
                 ("RIGHTPADDING", (0, 0), (-1, -1), 4),
             ]
@@ -272,42 +378,86 @@ def generate_acta_cierre_pdf(payload: dict[str, Any]) -> tuple[bytes, str]:
         )
     )
 
+    # Firmas: 4 columnas (etiqueta | valor | etiqueta | valor), como el formato físico.
+    half = CONTENT_W * 0.5
+    label_w = half * 0.32
+    value_w = half * 0.68
+    dots = "………………………………"
+
+    def _sign_val(raw: str) -> Paragraph:
+        text = _esc(raw) if raw.strip() and raw.strip() != "……………………" else dots
+        return Paragraph(text, st["sign_value"])
+
+    bn_nombre_p = _sign_val(bn_nombre)
+    bn_cargo_p = _sign_val(bn_cargo)
+    bn_dni_p = _sign_val(bn_dni)
+    sertec_nombre_p = _sign_val(sertec_nombre)
+    sertec_cargo_p = _sign_val(sertec_cargo if sertec_cargo.strip() else "Inventariador")
+    sertec_dni_p = _sign_val(sertec_dni)
+
     sign_rows = [
-        ["BANCO DE LA NACION", "SERTEC"],
-        ["Nombre", "Nombre"],
-        [_esc(bn_nombre), _esc(sertec_nombre)],
-        ["Cargo", "Cargo"],
-        [_esc(bn_cargo), _esc(sertec_cargo)],
-        ["Código/DNI", "DNI"],
-        [_esc(bn_dni), _esc(sertec_dni)],
-        ["(Firma y Sello)", "(Firma)"],
-        ["", ""],
-        ["", ""],
-        ["", ""],
+        [
+            Paragraph("BANCO DE LA NACION", st["sign_header"]),
+            "",
+            Paragraph("SERTEC", st["sign_header"]),
+            "",
+        ],
+        [
+            Paragraph("Nombre", st["sign_label"]),
+            bn_nombre_p,
+            Paragraph("Nombre", st["sign_label"]),
+            sertec_nombre_p,
+        ],
+        [
+            Paragraph("Cargo", st["sign_label"]),
+            bn_cargo_p,
+            Paragraph("Cargo", st["sign_label"]),
+            sertec_cargo_p,
+        ],
+        [
+            Paragraph("Código/DNI", st["sign_label"]),
+            bn_dni_p,
+            Paragraph("DNI", st["sign_label"]),
+            sertec_dni_p,
+        ],
+        [
+            Paragraph("(Firma y Sello)", st["sign_footer"]),
+            "",
+            Paragraph("(Firma)", st["sign_footer"]),
+            "",
+        ],
+        ["", "", "", ""],
     ]
-    sign_row_heights = [None] * 7 + [8 * mm, 16 * mm, 16 * mm, 16 * mm]
     sign_table = Table(
         sign_rows,
-        colWidths=[CONTENT_W * 0.5, CONTENT_W * 0.5],
-        rowHeights=sign_row_heights,
+        colWidths=[label_w, value_w, label_w, value_w],
+        rowHeights=[10 * mm, 9 * mm, 9 * mm, 9 * mm, 8 * mm, 38 * mm],
     )
     sign_table.setStyle(
         TableStyle(
             [
-                ("FONTNAME", (0, 0), (-1, 0), FONT_BOLD),
-                ("FONTNAME", (0, 1), (-1, -1), FONT),
-                ("FONTSIZE", (0, 0), (-1, -1), 9),
-                ("ALIGN", (0, 0), (-1, -1), "CENTER"),
-                ("VALIGN", (0, 0), (-1, 6), "MIDDLE"),
-                ("VALIGN", (0, 7), (-1, -1), "TOP"),
+                ("SPAN", (0, 0), (1, 0)),
+                ("SPAN", (2, 0), (3, 0)),
+                ("SPAN", (0, 4), (1, 4)),
+                ("SPAN", (2, 4), (3, 4)),
+                ("SPAN", (0, 5), (1, 5)),
+                ("SPAN", (2, 5), (3, 5)),
+                ("BACKGROUND", (0, 0), (1, 0), header_bg),
+                ("BACKGROUND", (2, 0), (3, 0), header_bg),
                 ("GRID", (0, 0), (-1, -1), BORDER, LINE_COLOR),
-                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#F5E6D3")),
-                ("TOPPADDING", (0, 0), (-1, 6), 4),
-                ("BOTTOMPADDING", (0, 0), (-1, 6), 4),
-                ("TOPPADDING", (0, 7), (-1, -1), 6),
-                ("BOTTOMPADDING", (0, 7), (-1, -1), 6),
-                ("SPAN", (0, 8), (0, 10)),
-                ("SPAN", (1, 8), (1, 10)),
+                ("VALIGN", (0, 0), (-1, 3), "MIDDLE"),
+                ("VALIGN", (0, 4), (-1, 4), "MIDDLE"),
+                ("VALIGN", (0, 5), (-1, 5), "TOP"),
+                ("ALIGN", (0, 0), (-1, 0), "CENTER"),
+                ("ALIGN", (0, 4), (-1, 4), "CENTER"),
+                ("LEFTPADDING", (0, 0), (-1, -1), 4),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+                ("TOPPADDING", (0, 0), (-1, 3), 3),
+                ("BOTTOMPADDING", (0, 0), (-1, 3), 3),
+                ("TOPPADDING", (0, 4), (-1, 5), 4),
+                ("BOTTOMPADDING", (0, 4), (-1, 5), 4),
+                # Línea vertical fuerte entre BN y SERTEC
+                ("LINEBEFORE", (2, 0), (2, -1), 1.25, LINE_COLOR),
             ]
         )
     )

@@ -7,6 +7,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query
 from app.core.reporte_local_storage import read_local_reporte_local_file
 from app.core.item_photo_storage import read_local_item_photo
+from app.core.public_photo_storage import read_photo
 from app.core.tenant_logo_storage import read_stored_logo_file, read_tenant_logo_bytes
 from fastapi.responses import Response
 from sqlalchemy import select
@@ -44,6 +45,27 @@ def serve_item_photo(tenant_id: UUID, filename: str) -> Response:
         content=body,
         media_type=mime,
         headers={"Cache-Control": "public, max-age=86400"},
+    )
+
+
+@router.get("/person-photo/{tenant_id}/{filename}")
+def serve_person_photo(tenant_id: UUID, filename: str) -> Response:
+    return _serve_photo(read_photo("person", tenant_id, filename))
+
+
+@router.get("/margesi-photo/{tenant_id}/{filename}")
+def serve_margesi_photo(tenant_id: UUID, filename: str) -> Response:
+    return _serve_photo(read_photo("margesi", tenant_id, filename))
+
+
+def _serve_photo(pack: tuple[bytes, str] | None) -> Response:
+    if not pack:
+        raise HTTPException(status_code=404, detail="Imagen no encontrada")
+    body, mime = pack
+    return Response(
+        content=body,
+        media_type=mime,
+        headers={"Cache-Control": "private, max-age=86400, immutable"},
     )
 
 

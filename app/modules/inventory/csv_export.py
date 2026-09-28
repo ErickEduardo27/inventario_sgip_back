@@ -55,6 +55,22 @@ def copy_query_to_csv_bytes(inner_sql: str, params: tuple) -> bytes:
         conn.close()
 
 
+def rewrite_csv_header_underscores_to_spaces(payload: bytes) -> bytes:
+    """Reemplaza ``_`` por espacio solo en la fila de cabeceras del CSV."""
+    text = payload.decode("utf-8-sig", errors="replace")
+    if not text:
+        return payload
+    if "\r\n" in text[:4096]:
+        nl = "\r\n"
+        header, sep, rest = text.partition("\r\n")
+    else:
+        nl = "\n"
+        header, sep, rest = text.partition("\n")
+    if not sep:
+        return header.replace("_", " ").encode("utf-8")
+    return (header.replace("_", " ") + nl + rest).encode("utf-8")
+
+
 def _sanitize_excel_value(value: object) -> object:
     if not isinstance(value, str):
         return value

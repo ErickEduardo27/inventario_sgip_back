@@ -53,6 +53,7 @@ INVENTORY_UI_COMPONENT_CODES: frozenset[str] = frozenset(
         "reporte_aptot_locales",
         "reporte_locales",
         "conciliacion",
+        "conciliacion_margesi",
         "conciliacion_sbn",
         "desconciliacion",
         "desconciliacion_sbn",

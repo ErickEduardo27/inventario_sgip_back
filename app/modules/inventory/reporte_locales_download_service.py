@@ -337,17 +337,17 @@ def schedule_bulk_download(
         label = "seleccion"
     filename = f"reporte_locales_{label}_{stamp}.zip"
 
-    job_id = uuid.uuid4()
-    row = dl_svc.create_descarga_archivo(
-        db,
-        job_id=job_id,
-        tenant_id=tenant_id,
-        module="reporte_locales",
-        filename=filename,
-        created_by_id=created_by_id,
+    ids_key = sorted({int(x) for x in (establishment_ids or []) if x is not None})
+    request_key = dl_svc.build_export_request_key(
+        "reporte_locales",
+        tenant_id,
+        {
+            "establishment_ids": ids_key,
+            "department_id": (department_id or "").strip() or None,
+            "include_fotos": bool(include_fotos),
+            "include_pdfs": bool(include_pdfs),
+        },
     )
-    db.commit()
-
     payload = {
         "establishment_ids": establishment_ids or [],
         "department_id": department_id,
@@ -355,17 +355,45 @@ def schedule_bulk_download(
         "include_pdfs": include_pdfs,
         "file_count": len(items),
     }
-    task = export_reporte_locales_files_zip_task.delay(
-        str(job_id),
-        str(tenant_id),
-        payload,
+    return dl_svc.enqueue_shared_export(
+        db,
+        tenant_id=tenant_id,
+        module="reporte_locales",
+        request_key=request_key,
+        filename=filename,
+        created_by_id=created_by_id,
+        label="ZIP reporte locales",
+        enqueue_celery=lambda job_id: export_reporte_locales_files_zip_task.delay(
+            str(job_id),
+            str(tenant_id),
+            payload,
+        ),
     )
-    dl_svc.set_celery_task_id(db, row, task.id)
-    db.commit()
 
-    return {
-        "success": True,
-        "async_job": True,
-        "job_id": str(job_id),
-        "message": f"Descarga masiva encolada ({len(items)} archivo(s)). Consulte el estado para obtener el enlace.",
-    }
+
+def get_bulk_download_meta(
+    db: Session,
+    *,
+    tenant_id: UUID,
+    establishment_ids: list[int] | None,
+    department_id: str | None,
+    include_fotos: bool,
+    include_pdfs: bool,
+) -> dict[str, Any]:
+    ids_key = sorted({int(x) for x in (establishment_ids or []) if x is not None})
+    request_key = dl_svc.build_export_request_key(
+        "reporte_locales",
+        tenant_id,
+        {
+            "establishment_ids": ids_key,
+            "department_id": (department_id or "").strip() or None,
+            "include_fotos": bool(include_fotos),
+            "include_pdfs": bool(include_pdfs),
+        },
+    )
+    return dl_svc.get_shared_export_meta(
+        db,
+        tenant_id=tenant_id,
+        module="reporte_locales",
+        request_key=request_key,
+    )

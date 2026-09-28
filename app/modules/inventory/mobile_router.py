@@ -61,11 +61,16 @@ def mobile_catalog(
     page: int = Query(1, ge=1),
     per_page: int = Query(400, ge=20, le=800),
     search: str | None = Query(None),
+    after_id: int | None = Query(
+        None,
+        ge=0,
+        description="Paginación por cursor: filas con id > after_id (evita OFFSET profundo en descargas masivas)",
+    ),
     db: Session = Depends(get_db),
     tenant_id: UUID = Depends(get_tenant_id),
     _: User = Depends(require_permission("hoja_captura", "view")),
 ):
-    return mob.catalog_index(db, tenant_id, page=page, per_page=per_page, search=search)
+    return mob.catalog_index(db, tenant_id, page=page, per_page=per_page, search=search, after_id=after_id)
 
 
 @router.get("/lookup/{valor}")

@@ -25,8 +25,53 @@ APTOT_IMPORT_MODULES = frozenset(
 )
 
 
-def rebuild_reporte_aptot_cache(db: Session, tenant_id: UUID) -> dict[str, int | str]:
-    """Borra y repuebla el cache del tenant (equivalente al SP de descarga total)."""
+def _lock_tenant_rebuild(db: Session, tenant_id: UUID) -> None:
+    """Serializa reconstrucciones del mismo tenant (se libera al commit/rollback).
+
+    Sin esto, dos tareas simultáneas hacen DELETE + INSERT cruzados y la segunda choca con
+    ``uq_reporte_aptot_cache_source`` al insertar filas que la primera ya confirmó.
+    """
+    db.execute(
+        text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"),
+        {"lock_key": f"reporte_aptot_cache:{tenant_id}"},
+    )
+
+
+def rebuild_reporte_aptot_cache(
+    db: Session,
+    tenant_id: UUID,
+    *,
+    requested_at: datetime | None = None,
+) -> dict[str, int | str]:
+    """Borra y repuebla el cache del tenant (equivalente al SP de descarga total).
+
+    Si ``requested_at`` es anterior a la última reconstrucción terminada, esa reconstrucción ya
+    incluye los cambios que motivaron la solicitud y no se repite.
+    """
+    _lock_tenant_rebuild(db, tenant_id)
+    meta = db.execute(
+        select(m.InvReporteAptotCacheMeta)
+        .where(m.InvReporteAptotCacheMeta.tenant_id == tenant_id)
+        .execution_options(populate_existing=True),
+    ).scalar_one_or_none()
+    if (
+        requested_at is not None
+        and meta is not None
+        and meta.refreshed_at is not None
+        and meta.refreshed_at >= requested_at
+    ):
+        result: dict[str, int | str] = {
+            "tenant_id": str(tenant_id),
+            "row_count": int(meta.row_count or 0),
+            "refreshed_at": meta.refreshed_at.isoformat(),
+            "skipped": "already_fresh",
+        }
+        meta.status = "ready"
+        meta.message = ""
+        db.add(meta)
+        db.commit()
+        return result
+
     refreshed_at = datetime.now(timezone.utc)
     db.execute(
         delete(m.InvReporteAptotCache).where(m.InvReporteAptotCache.tenant_id == tenant_id),
@@ -40,7 +85,6 @@ def rebuild_reporte_aptot_cache(db: Session, tenant_id: UUID) -> dict[str, int |
         .select_from(m.InvReporteAptotCache)
         .where(m.InvReporteAptotCache.tenant_id == tenant_id),
     )
-    meta = db.get(m.InvReporteAptotCacheMeta, tenant_id)
     if meta is None:
         meta = m.InvReporteAptotCacheMeta(tenant_id=tenant_id)
     meta.refreshed_at = refreshed_at
@@ -73,6 +117,7 @@ def schedule_reporte_aptot_cache_refresh(tenant_id: UUID, *, countdown: int = 2)
 
         refresh_reporte_aptot_cache_task.apply_async(
             args=[str(tenant_id)],
+            kwargs={"requested_at": datetime.now(timezone.utc).isoformat()},
             countdown=countdown,
         )
     except Exception as exc:  # noqa: BLE001

@@ -162,6 +162,7 @@ def catalog_index(
     page: int = 1,
     per_page: int = 400,
     search: str | None = None,
+    after_id: int | None = None,
 ) -> dict[str, Any]:
     stmt = select(m.InvMargesiItem).where(m.InvMargesiItem.tenant_id == tenant_id)
     term = (search or "").strip()
@@ -177,17 +178,27 @@ def catalog_index(
                 m.InvMargesiItem.inv_num.ilike(like),
             )
         )
-    total = db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
-    rows = db.scalars(
-        stmt.order_by(m.InvMargesiItem.id.asc()).offset((page - 1) * per_page).limit(per_page)
-    ).all()
+    # En modo cursor el total solo se calcula en el primer bloque (after_id=0); el cliente lo conserva.
+    count_needed = after_id is None or after_id == 0
+    total = (db.scalar(select(func.count()).select_from(stmt.subquery())) or 0) if count_needed else -1
+    if after_id is not None:
+        # Cursor: sin OFFSET; el cliente pide el siguiente bloque con el último id recibido.
+        rows = db.scalars(
+            stmt.where(m.InvMargesiItem.id > after_id).order_by(m.InvMargesiItem.id.asc()).limit(per_page)
+        ).all()
+    else:
+        rows = db.scalars(
+            stmt.order_by(m.InvMargesiItem.id.asc()).offset((page - 1) * per_page).limit(per_page)
+        ).all()
+    data = [_catalog_row(r) for r in rows]
     return {
-        "data": [_catalog_row(r) for r in rows],
+        "data": data,
         "meta": {
             "page": page,
             "per_page": per_page,
             "total": int(total),
-            "pages": max(1, (int(total) + per_page - 1) // per_page),
+            "pages": max(1, (int(total) + per_page - 1) // per_page) if total >= 0 else None,
+            "next_after_id": data[-1]["id"] if len(data) == per_page else None,
         },
     }
 
@@ -549,6 +560,12 @@ def _sync_one(db: Session, tenant_id: UUID, user: User, item: MobileSyncItem) ->
     if inv_num in (None, ""):
         return {"client_id": item.client_id, "success": False, "message": "Número de inventario no disponible"}
 
+    parsed_preferred = try_parse_inventory_number(inv_num)
+    if parsed_preferred is None:
+        return {"client_id": item.client_id, "success": False, "message": "Número de inventario inválido"}
+    allocated_inv = inv._next_available_inv_num(db, tenant_id, parsed_preferred)
+    inv_num = format_inv_num(allocated_inv)
+
     marg = None
     if item.id_margesi:
         marg = db.get(m.InvMargesiItem, item.id_margesi)
@@ -577,7 +594,7 @@ def _sync_one(db: Session, tenant_id: UUID, user: User, item: MobileSyncItem) ->
     write = CardItemWrite(
         id_margesi=item.id_margesi if marg else None,
         no_conciliar=item.no_conciliar or not marg,
-        inv_num=inv_num,
+        inv_num=allocated_inv,
         inv_num_1=item.inv_num_1 or item.scanned_code,
         inv_num_2=item.inv_num_2,
         mar_num=item.mar_num or item.scanned_code or (marg.mar_num if marg else None),
@@ -605,18 +622,19 @@ def _sync_one(db: Session, tenant_id: UUID, user: User, item: MobileSyncItem) ->
         mar_foto2=photo_urls.get("mar_foto2") or item.mar_foto2,
         mar_foto3=photo_urls.get("mar_foto3") or item.mar_foto3,
     )
-    success, message = inv.store_card_item(db, tenant_id, card_id, write, operator_id=user.id)
-    if not success:
-        return {"client_id": item.client_id, "success": False, "message": message, "card_id": card_id}
+    result = inv.store_card_item(db, tenant_id, card_id, write, operator_id=user.id)
+    if not result.ok:
+        return {"client_id": item.client_id, "success": False, "message": result.message, "card_id": card_id}
 
-    parsed_inv = try_parse_inventory_number(inv_num)
     saved = None
-    if parsed_inv is not None:
+    if result.item_id is not None:
+        saved = db.get(m.InvItemCard, result.item_id)
+    if saved is None and result.inv_num is not None:
         saved = db.scalar(
             select(m.InvItemCard).where(
                 m.InvItemCard.tenant_id == tenant_id,
                 m.InvItemCard.id_card == card_id,
-                m.InvItemCard.inv_num == parsed_inv,
+                m.InvItemCard.inv_num == result.inv_num,
             )
         )
     if saved:
@@ -646,7 +664,7 @@ def _sync_one(db: Session, tenant_id: UUID, user: User, item: MobileSyncItem) ->
     return {
         "client_id": item.client_id,
         "success": True,
-        "message": message,
+        "message": result.message,
         "card_id": card_id,
         "item_id": int(saved.id) if saved else None,
         "inv_num": format_inv_num(saved.inv_num) if saved and saved.inv_num is not None else str(inv_num),

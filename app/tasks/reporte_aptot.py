@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from uuid import UUID
 
 from app.celery_app import celery_app
@@ -14,12 +15,13 @@ from app.modules.inventory.reporte_aptot_cache import (
 
 
 @celery_app.task(bind=True, name="reporte.refresh_aptot_cache")
-def refresh_reporte_aptot_cache_task(self, tenant_id: str) -> dict:
+def refresh_reporte_aptot_cache_task(self, tenant_id: str, requested_at: str | None = None) -> dict:
     tenant_uuid = UUID(tenant_id)
+    requested_dt = datetime.fromisoformat(requested_at) if requested_at else None
     with SessionLocal() as db:
         try:
             mark_reporte_aptot_cache_refreshing(db, tenant_uuid)
-            result = rebuild_reporte_aptot_cache(db, tenant_uuid)
+            result = rebuild_reporte_aptot_cache(db, tenant_uuid, requested_at=requested_dt)
             return {"success": True, **result}
         except Exception as exc:  # noqa: BLE001
             db.rollback()

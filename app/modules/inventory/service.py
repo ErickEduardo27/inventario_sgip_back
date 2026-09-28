@@ -6,12 +6,12 @@ import calendar
 import math
 import uuid as uuid_mod
 from datetime import date, datetime, time, timedelta, timezone
-from typing import Any
+from typing import Any, NamedTuple
 from uuid import UUID
 
-from sqlalchemy import asc, desc, exists, func, or_, select, text
+from sqlalchemy import and_, asc, desc, exists, func, or_, select, text
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, aliased
 
 from app.core.exceptions import AppError
 from app.core.inventory_numbers import (
@@ -332,22 +332,34 @@ def delete_establishment(db: Session, tenant_id: UUID, est_id: int) -> tuple[boo
 
 
 def upsert_person(db: Session, tenant_id: UUID, body: PersonWrite) -> m.InvPerson:
+    from app.core.public_photo_storage import delete_photo
+
     data = body.model_dump(exclude={"id"})
     if body.id:
         row = db.get(m.InvPerson, body.id)
         if not row or row.tenant_id != tenant_id:
             raise ValueError("Persona no encontrada")
+        old_photo = _person_photo(row.extra)
         for k, v in data.items():
             setattr(row, k, v)
         db.add(row)
         db.commit()
         db.refresh(row)
+        if old_photo and old_photo != _person_photo(row.extra):
+            delete_photo("person", tenant_id, old_photo)
         return row
     row = m.InvPerson(tenant_id=tenant_id, **data)
     db.add(row)
     db.commit()
     db.refresh(row)
     return row
+
+
+def _person_photo(extra: Any) -> str | None:
+    if isinstance(extra, dict):
+        foto = str(extra.get("foto") or "").strip()
+        return foto or None
+    return None
 
 
 def delete_person(db: Session, tenant_id: UUID, person_id: int) -> tuple[bool, str]:
@@ -367,8 +379,12 @@ def delete_person(db: Session, tenant_id: UUID, person_id: int) -> tuple[bool, s
     )
     if card:
         return False, "No se puede eliminar porque está asignado en hojas de captura."
+    from app.core.public_photo_storage import delete_photo
+
+    photo = _person_photo(row.extra)
     db.delete(row)
     db.commit()
+    delete_photo("person", tenant_id, photo)
     return True, "Persona eliminada con éxito"
 
 
@@ -1305,6 +1321,33 @@ def _inv_num_in_use(db: Session, tenant_id: UUID, inv_num: int, exclude_id: int 
     return db.scalar(stmt) is not None
 
 
+def _next_available_inv_num(db: Session, tenant_id: UUID, preferred: int) -> int:
+    """Menor ``inv_num`` libre >= preferred (misma unicidad tenant/inv_num)."""
+    start = max(1, int(preferred))
+    if not _inv_num_in_use(db, tenant_id, start):
+        return start
+    used = [
+        int(n)
+        for n in db.scalars(
+            select(m.InvItemCard.inv_num)
+            .where(
+                m.InvItemCard.tenant_id == tenant_id,
+                m.InvItemCard.inv_num >= start,
+            )
+            .order_by(m.InvItemCard.inv_num.asc())
+            .limit(50_000)
+        ).all()
+        if n is not None
+    ]
+    candidate = start
+    for taken in used:
+        if taken > candidate:
+            return candidate
+        if taken == candidate:
+            candidate += 1
+    return candidate
+
+
 def _validate_card_item_fields(body: CardItemWrite) -> str | None:
     if body.inv_num is None:
         return "Número de inventario obligatorio"
@@ -1432,6 +1475,13 @@ def _link_item_to_margesi(
         ict.mar_des = marg.mar_des
 
 
+class StoreCardItemResult(NamedTuple):
+    ok: bool
+    message: str
+    item_id: int | None = None
+    inv_num: int | None = None
+
+
 def store_card_item(
     db: Session,
     tenant_id: UUID,
@@ -1439,23 +1489,34 @@ def store_card_item(
     body: CardItemWrite,
     *,
     operator_id: UUID | None = None,
-) -> tuple[bool, str]:
+) -> StoreCardItemResult:
     """Lógica de `CardsController::storeItem` (crear / actualizar ítem y sincronizar `margesi`)."""
     card = db.get(m.InvCard, card_id)
     if not card or card.tenant_id != tenant_id:
-        return False, "Hoja no encontrada"
+        return StoreCardItemResult(False, "Hoja no encontrada")
     if card.state == 2 and not body.id:
-        return False, "La hoja está cerrada; no se pueden agregar bienes"
+        return StoreCardItemResult(False, "La hoja está cerrada; no se pueden agregar bienes")
 
     err = _validate_card_item_fields(body)
     if err:
-        return False, err
+        return StoreCardItemResult(False, err)
 
     inv_num = body.inv_num
     if inv_num is None:
-        return False, "Número de inventario obligatorio"
-    if _inv_num_in_use(db, tenant_id, inv_num, exclude_id=body.id):
-        return False, "Número de inventario ya registrado"
+        return StoreCardItemResult(False, "Número de inventario obligatorio")
+
+    # En alta: si el N° ya existe, tomar el siguiente libre y continuar.
+    # En edición: no reasignar (evitar cambiar identidad del bien sin aviso explícito).
+    requested_inv_num = int(inv_num)
+    reassigned_inv_num = False
+    if body.id:
+        if _inv_num_in_use(db, tenant_id, requested_inv_num, exclude_id=body.id):
+            return StoreCardItemResult(False, "Número de inventario ya registrado")
+        inv_num = requested_inv_num
+    else:
+        inv_num = _next_available_inv_num(db, tenant_id, requested_inv_num)
+        reassigned_inv_num = inv_num != requested_inv_num
+        body.inv_num = inv_num
 
     operator = db.get(User, operator_id) if operator_id else None
 
@@ -1489,7 +1550,7 @@ def store_card_item(
     if body.id:
         ict = db.get(m.InvItemCard, body.id)
         if not ict or ict.tenant_id != tenant_id or ict.id_card != card_id:
-            return False, "Ítem no encontrado en esta hoja"
+            return StoreCardItemResult(False, "Ítem no encontrado en esta hoja")
         item_inv_sit_before = ict.inv_sit
         marg_inv_sit_before: str | None = None
         if ict.id_margesi:
@@ -1501,7 +1562,7 @@ def store_card_item(
             pending_marg = db.get(m.InvMargesiItem, body.id_margesi)
             if pending_marg and pending_marg.tenant_id == tenant_id:
                 pending_marg_inv_sit_before = pending_marg.inv_sit
-        ict.inv_num = body.inv_num
+        ict.inv_num = inv_num
         ict.inv_num_1 = body.inv_num_1
         ict.inv_num_2 = body.inv_num_2
         was_sobrante = not ict.id_margesi and str(ict.inv_sit or "").strip().upper() == "S"
@@ -1527,14 +1588,20 @@ def store_card_item(
                 db.add(marg)
         elif body.id_margesi and not body.no_conciliar:
             marg = db.get(m.InvMargesiItem, body.id_margesi)
-            if marg and marg.tenant_id == tenant_id:
-                mar_cpat_base = body.mar_cpat or marg.mar_cpat or ""
-                _link_item_to_margesi(card, ict, marg, mar_cpat=mar_cpat_base)
-                db.add(marg)
+            if marg is None or marg.tenant_id != tenant_id:
+                db.rollback()
+                return StoreCardItemResult(False, "Registro Margesi no encontrado")
+            mar_cpat_base = body.mar_cpat or marg.mar_cpat or ""
+            _link_item_to_margesi(card, ict, marg, mar_cpat=mar_cpat_base)
+            db.add(marg)
         elif body.no_conciliar or was_sobrante:
             ict.inv_sit = "S"
             ict.inv_con = None
             ict.id_margesi = None
+        # "C" (conciliado) exige un Margesi vinculado; sin vínculo el bien queda como sobrante.
+        if not ict.id_margesi and str(ict.inv_sit or "").strip().upper() == "C":
+            ict.inv_sit = "S"
+            ict.inv_con = None
         db.add(ict)
         db.add(card)
         if operator:
@@ -1555,7 +1622,7 @@ def store_card_item(
             db.commit()
         except IntegrityError:
             db.rollback()
-            return False, "Número de inventario ya registrado"
+            return StoreCardItemResult(False, "Número de inventario ya registrado")
         from app.modules.inventory.dashboard_establishment_stats_cache import (
             establishment_ids_for_card,
             schedule_dashboard_stats_after_card_item_change,
@@ -1591,19 +1658,25 @@ def store_card_item(
                     card_id=card_id,
                     changes=[change_for_establishment(est_ids[0], *transitions)],
                 )
-        return True, "Item modificado"
+        return StoreCardItemResult(True, "Item modificado", int(ict.id), inv_num)
 
     mar_cpat_base = (body.mar_cpat or "").strip()
     id_margesi = body.id_margesi
     if body.no_conciliar:
         id_margesi = None
+    elif not id_margesi:
+        return StoreCardItemResult(
+            False,
+            "Para registrar el bien como conciliado debe indicar el registro Margesi; "
+            "si no figura en el Margesi, regístrelo como sobrante.",
+        )
 
     marg_row: m.InvMargesiItem | None = None
     marg_inv_sit_before: str | None = None
     if id_margesi:
         marg_row = db.get(m.InvMargesiItem, id_margesi)
         if marg_row is None or marg_row.tenant_id != tenant_id:
-            return False, "Registro Margesi no encontrado"
+            return StoreCardItemResult(False, "Registro Margesi no encontrado")
         marg_inv_sit_before = marg_row.inv_sit
         if not mar_cpat_base and marg_row.mar_cpat:
             mar_cpat_base = str(marg_row.mar_cpat).strip()
@@ -1613,7 +1686,7 @@ def store_card_item(
         inv_con = None
     else:
         inv_sit = "C"
-        inv_con = "1" if id_margesi else None
+        inv_con = "1"
 
     initial_cpat = body.mar_cpat or ""
     item_des = body.mar_des
@@ -1625,7 +1698,7 @@ def store_card_item(
     ict = m.InvItemCard(
         tenant_id=tenant_id,
         id_card=card_id,
-        inv_num=body.inv_num,
+        inv_num=inv_num,
         mar_num=body.mar_num,
         mar_des=item_des,
         mar_cpat=initial_cpat or None,
@@ -1673,7 +1746,7 @@ def store_card_item(
         db.commit()
     except IntegrityError:
         db.rollback()
-        return False, "Número de inventario ya registrado"
+        return StoreCardItemResult(False, "Número de inventario ya registrado")
     from app.modules.inventory.dashboard_establishment_stats_cache import (
         establishment_ids_for_card,
         schedule_dashboard_stats_after_card_item_change,
@@ -1695,18 +1768,26 @@ def store_card_item(
             card_id=card_id,
             changes=[change_for_establishment(est_ids[0], *transitions)],
         )
-    return True, "Item agregado"
+    if reassigned_inv_num:
+        return StoreCardItemResult(
+            True,
+            f"Item agregado. El N° {format_inv_num(requested_inv_num)} ya estaba registrado; "
+            f"se usó el disponible {format_inv_num(inv_num)}.",
+            int(ict.id),
+            inv_num,
+        )
+    return StoreCardItemResult(True, "Item agregado", int(ict.id), inv_num)
 
 
 def edit_card_item(
     db: Session, tenant_id: UUID, body: CardItemWrite, *, operator_id: UUID | None = None
-) -> tuple[bool, str]:
+) -> StoreCardItemResult:
     """Edición por ID de ítem (`hoja-captura/edit/item`)."""
     if not body.id:
-        return False, "ID de ítem requerido"
+        return StoreCardItemResult(False, "ID de ítem requerido")
     ict = db.get(m.InvItemCard, body.id)
     if not ict or ict.tenant_id != tenant_id:
-        return False, "Ítem no encontrado"
+        return StoreCardItemResult(False, "Ítem no encontrado")
     return store_card_item(db, tenant_id, int(ict.id_card), body, operator_id=operator_id)
 
 
@@ -1798,6 +1879,22 @@ def list_item_cards(db: Session, tenant_id: UUID, q: RecordQuery, allowed_cols: 
             stmt = stmt.where(_where_column_ilike(m.InvItemCard, col, q.value, numeric_cols=_ITEMCARD_INT_FILTER_COLS))
         else:
             stmt = stmt.where(getattr(m.InvItemCard, col).ilike(f"%{q.value}%"))
+
+    pattern = _search_like(q)
+    if pattern is not None:
+        stmt = stmt.where(
+            or_(
+                numeric_column_ilike(m.InvItemCard.inv_num, pattern),
+                m.InvItemCard.mar_cpat.ilike(pattern),
+                m.InvItemCard.mar_num.ilike(pattern),
+                m.InvItemCard.mar_des.ilike(pattern),
+                m.InvItemCard.inv_sit.ilike(pattern),
+                m.InvItemCard.inv_con.ilike(pattern),
+                m.InvItemCard.mar_sit_conta.ilike(pattern),
+                m.InvItemCard.extra["mar_eti"].astext.ilike(pattern),
+                m.InvItemCard.extra["mar_est"].astext.ilike(pattern),
+            )
+        )
 
     stmt = stmt.order_by(_ord_clause(m.InvItemCard, order_col, q.ord_tipo))
     rows, total = _paged(db, stmt, q.page, q.per_page)
@@ -1922,12 +2019,22 @@ def delete_item_card(
 
 def upsert_list_sbn(db: Session, tenant_id: UUID, body: ListSbnWrite) -> m.InvListSbn:
     data = body.model_dump(exclude={"id"})
+    code = (body.code or "").strip()
+    if not code:
+        raise ValueError("El código SBN es obligatorio")
+    data["code"] = code
+    dup_stmt = select(m.InvListSbn.id).where(m.InvListSbn.tenant_id == tenant_id, m.InvListSbn.code == code)
+    if body.id:
+        dup_stmt = dup_stmt.where(m.InvListSbn.id != body.id)
+    if db.scalar(dup_stmt) is not None:
+        raise ValueError(f"Ya existe un ítem del catálogo con el código {code}")
     if body.id:
         row = db.get(m.InvListSbn, body.id)
         if not row or row.tenant_id != tenant_id:
             raise ValueError("Registro no encontrado")
-        for k, v in data.items():
-            setattr(row, k, v)
+        # Solo los campos enviados: el formulario no maneja foto/extra y no debe borrarlos al editar.
+        for k, v in body.model_dump(exclude={"id"}, exclude_unset=True).items():
+            setattr(row, k, data[k] if k == "code" else v)
         db.add(row)
         db.commit()
         db.refresh(row)
@@ -2016,11 +2123,13 @@ def upsert_margesi(db: Session, tenant_id: UUID, body: MargesiWrite) -> m.InvMar
                 raise ValueError("Registro no encontrado")
             for k in _MARGESI_INVENTORY_FIELDS:
                 data.pop(k, None)
+            old_photos = (row.mar_foto, row.mar_foto2)
             apply_write_payload(row, data)
             db.add(row)
             _bump_list_sbn_cat_ulti_from_margesi(db, tenant_id, row)
             db.commit()
             db.refresh(row)
+            _cleanup_margesi_photos(tenant_id, old_photos, keep=(row.mar_foto, row.mar_foto2))
             # from app.modules.inventory.dashboard_establishment_stats_cache import (
             #     establishment_ids_for_margesi,
             #     schedule_dashboard_establishment_stats_refresh,
@@ -2050,6 +2159,15 @@ def upsert_margesi(db: Session, tenant_id: UUID, body: MargesiWrite) -> m.InvMar
         raise
 
 
+def _cleanup_margesi_photos(tenant_id: UUID, old: tuple[str | None, ...], keep: tuple[str | None, ...]) -> None:
+    """Borra del almacenamiento las fotos que ya no referencia el bien (solo las subidas por la API)."""
+    from app.core.public_photo_storage import delete_photo
+
+    for stored in old:
+        if stored and stored not in keep:
+            delete_photo("margesi", tenant_id, stored)
+
+
 def delete_margesi(db: Session, tenant_id: UUID, margesi_id: int) -> tuple[bool, str]:
     row = db.get(m.InvMargesiItem, margesi_id)
     if not row or row.tenant_id != tenant_id:
@@ -2062,8 +2180,10 @@ def delete_margesi(db: Session, tenant_id: UUID, margesi_id: int) -> tuple[bool,
     )
     if item:
         return False, "No se puede eliminar porque está vinculado a un bien inventariado."
+    photos = (row.mar_foto, row.mar_foto2)
     db.delete(row)
     db.commit()
+    _cleanup_margesi_photos(tenant_id, photos, keep=())
     return True, "Registro de patrimonio eliminado con éxito"
 
 
@@ -2092,6 +2212,10 @@ def list_margesi(db: Session, tenant_id: UUID, q: RecordQuery, allowed_cols: set
     local_code = (q.local_code or "").strip()
     if local_code:
         stmt = stmt.where(m.InvMargesiItem.amb_cod == local_code)
+    if q.estado_filter:
+        # Mismo criterio que la etiqueta del listado: N (nuevo) se muestra como Bueno e I como Regular.
+        estados = {"B": ("B", "N"), "R": ("R", "I"), "M": ("M",)}[q.estado_filter]
+        stmt = stmt.where(func.upper(m.InvMargesiItem.mar_est).in_(estados))
     pattern = _search_like(q)
     if pattern is not None:
         stmt = stmt.where(
@@ -2490,17 +2614,172 @@ def _count_dashboard_bienes(
     return int(db.scalar(stmt) or 0)
 
 
+def _dashboard_establishment_code(
+    db: Session,
+    tenant_id: UUID,
+    establishment_id: int | None,
+) -> str | None:
+    if not establishment_id:
+        return None
+    code = db.scalar(
+        select(m.InvEstablishment.code).where(
+            m.InvEstablishment.tenant_id == tenant_id,
+            m.InvEstablishment.id == establishment_id,
+        )
+    )
+    text = str(code or "").strip()
+    return text or None
+
+
+def _dashboard_itemcard_establishment_exists(establishment_id: int):
+    """Mismo EXISTS que ``list_item_cards`` al filtrar por local."""
+    return exists(
+        select(1)
+        .select_from(m.InvCard)
+        .join(
+            m.InvEnvironment,
+            (m.InvEnvironment.id == m.InvCard.id_ambiente)
+            & (m.InvEnvironment.tenant_id == m.InvCard.tenant_id),
+        )
+        .where(
+            m.InvCard.id == m.InvItemCard.id_card,
+            m.InvCard.tenant_id == m.InvItemCard.tenant_id,
+            m.InvEnvironment.establishment_id == establishment_id,
+        )
+    )
+
+
 def _dashboard_margesi_pendientes(
     db: Session,
     tenant_id: UUID,
     establishment_id: int | None = None,
 ) -> int:
-    stmt = select(func.coalesce(func.sum(m.InvDashboardEstablishmentStat.margesi_faltantes), 0)).where(
-        m.InvDashboardEstablishmentStat.tenant_id == tenant_id,
+    """Pendientes = faltantes, mismo criterio que el módulo Margesi (filtro F)."""
+    stmt = select(func.count(m.InvMargesiItem.id)).where(
+        m.InvMargesiItem.tenant_id == tenant_id,
+        _margesi_faltantes_inv_sit_clause(),
+    )
+    local_code = _dashboard_establishment_code(db, tenant_id, establishment_id)
+    if establishment_id:
+        if not local_code:
+            return 0
+        stmt = stmt.where(m.InvMargesiItem.amb_cod == local_code)
+    return int(db.scalar(stmt) or 0)
+
+
+def _dashboard_inventory_status_totals(
+    db: Session,
+    tenant_id: UUID,
+    establishment_id: int | None = None,
+) -> dict[str, int]:
+    """Totales en vivo con el mismo universo/criterio que Margesi y Bienes inventariados.
+
+    Margesi se agrupa por el local registrado (``amb_cod``) y los bienes por el local donde se
+    inventariaron (hoja → ambiente). Por local ambas cifras de conciliados pueden diferir cuando un
+    bien del Margesi de un local se halló en otro; los contadores ``*_otro_local`` lo explican.
+    """
+    local_code = _dashboard_establishment_code(db, tenant_id, establishment_id)
+    margesi_conc_otro_local = 0
+    invent_conc_otro_local = 0
+
+    margesi_cols = [
+        func.count(m.InvMargesiItem.id),
+        func.count(m.InvMargesiItem.id).filter(m.InvMargesiItem.inv_sit == "C"),
+        func.count(m.InvMargesiItem.id).filter(_margesi_faltantes_inv_sit_clause()),
+        func.count(m.InvMargesiItem.id).filter(m.InvMargesiItem.inv_sit == "N"),
+    ]
+    if establishment_id:
+        ic_found = aliased(m.InvItemCard)
+        found_in_other_local = exists(
+            select(1)
+            .select_from(ic_found)
+            .join(m.InvCard, (m.InvCard.id == ic_found.id_card) & (m.InvCard.tenant_id == ic_found.tenant_id))
+            .join(
+                m.InvEnvironment,
+                (m.InvEnvironment.id == m.InvCard.id_ambiente) & (m.InvEnvironment.tenant_id == m.InvCard.tenant_id),
+            )
+            .where(
+                ic_found.tenant_id == m.InvMargesiItem.tenant_id,
+                ic_found.id_margesi == m.InvMargesiItem.id,
+                m.InvEnvironment.establishment_id != establishment_id,
+            )
+        )
+        margesi_cols.append(
+            func.count(m.InvMargesiItem.id).filter(and_(m.InvMargesiItem.inv_sit == "C", found_in_other_local))
+        )
+    margesi_stmt = select(*margesi_cols).where(m.InvMargesiItem.tenant_id == tenant_id)
+    if establishment_id:
+        if not local_code:
+            margesi_total = margesi_conc = margesi_falt = margesi_ninv = 0
+        else:
+            margesi_stmt = margesi_stmt.where(m.InvMargesiItem.amb_cod == local_code)
+            (
+                margesi_total,
+                margesi_conc,
+                margesi_falt,
+                margesi_ninv,
+                margesi_conc_otro_local,
+            ) = db.execute(margesi_stmt).one()
+    else:
+        margesi_total, margesi_conc, margesi_falt, margesi_ninv = db.execute(margesi_stmt).one()
+
+    marg_linked = aliased(m.InvMargesiItem)
+    invent_cols = [
+        func.count(m.InvItemCard.id),
+        func.count(m.InvItemCard.id).filter(m.InvItemCard.inv_sit == "C"),
+        func.count(m.InvItemCard.id).filter(m.InvItemCard.inv_sit == "S"),
+        func.count(m.InvItemCard.id).filter(m.InvItemCard.inv_sit == "N"),
+        func.count(m.InvItemCard.id).filter(
+            and_(m.InvItemCard.inv_sit == "C", m.InvItemCard.id_margesi.is_(None))
+        ),
+    ]
+    if establishment_id:
+        invent_cols.append(
+            func.count(m.InvItemCard.id).filter(
+                and_(
+                    m.InvItemCard.inv_sit == "C",
+                    marg_linked.id.is_not(None),
+                    func.coalesce(marg_linked.amb_cod, "") != (local_code or ""),
+                )
+            )
+        )
+    invent_stmt = (
+        select(*invent_cols)
+        .select_from(m.InvItemCard)
+        .outerjoin(
+            marg_linked,
+            (marg_linked.id == m.InvItemCard.id_margesi) & (marg_linked.tenant_id == m.InvItemCard.tenant_id),
+        )
+        .where(m.InvItemCard.tenant_id == tenant_id)
     )
     if establishment_id:
-        stmt = stmt.where(m.InvDashboardEstablishmentStat.establishment_id == establishment_id)
-    return int(db.scalar(stmt) or 0)
+        invent_stmt = invent_stmt.where(_dashboard_itemcard_establishment_exists(establishment_id))
+        (
+            invent_total,
+            invent_conc,
+            invent_sobr,
+            invent_nconc,
+            invent_conc_sin_margesi,
+            invent_conc_otro_local,
+        ) = db.execute(invent_stmt).one()
+    else:
+        invent_total, invent_conc, invent_sobr, invent_nconc, invent_conc_sin_margesi = db.execute(
+            invent_stmt
+        ).one()
+
+    return {
+        "margesi_conciliado_en_otro_local": int(margesi_conc_otro_local or 0),
+        "inventario_conciliado_margesi_otro_local": int(invent_conc_otro_local or 0),
+        "inventario_conciliado_sin_margesi": int(invent_conc_sin_margesi or 0),
+        "margesi_total_stock": int(margesi_total or 0),
+        "margesi_conciliado": int(margesi_conc or 0),
+        "margesi_faltantes": int(margesi_falt or 0),
+        "margesi_no_inventariable": int(margesi_ninv or 0),
+        "inventario_total_stock": int(invent_total or 0),
+        "inventario_conciliado": int(invent_conc or 0),
+        "inventario_sobrante": int(invent_sobr or 0),
+        "inventario_no_conciliable": int(invent_nconc or 0),
+    }
 
 
 def inventory_dashboard(
@@ -2580,6 +2859,7 @@ def inventory_dashboard(
         establishment_id=establishment_id,
     )
     margesi_pendientes = _dashboard_margesi_pendientes(db, tenant_id, establishment_id)
+    status_totals = _dashboard_inventory_status_totals(db, tenant_id, establishment_id)
 
     return {
         "kpis": {
@@ -2587,6 +2867,7 @@ def inventory_dashboard(
             "margesi_total": sum(margesi_by_month.values()),
             "bienes_prev_total": bienes_prev_total,
             "margesi_pendientes": margesi_pendientes,
+            **status_totals,
         },
         "by_month": by_month,
     }
@@ -2879,7 +3160,7 @@ def get_reporte_aptot_locales_export_meta(
     *,
     export_format: str = "csv",
 ) -> dict[str, Any]:
-    from sqlalchemy import select
+    from app.modules.inventory import descarga_archivos_service as dl_svc
 
     est = db.get(m.InvEstablishment, establishment_id)
     if not est or est.tenant_id != tenant_id:
@@ -2888,51 +3169,67 @@ def get_reporte_aptot_locales_export_meta(
     fmt = (export_format or "csv").strip().lower()
     if fmt not in ("csv", "xlsx"):
         fmt = "csv"
-    suffix = ".xlsx" if fmt == "xlsx" else ".csv"
 
-    prefix = f"reporte_aptot_locales_{establishment_id}_"
-    job = db.scalar(
-        select(m.InvDescargaArchivo)
-        .where(
-            m.InvDescargaArchivo.tenant_id == tenant_id,
-            m.InvDescargaArchivo.module == "reporte_aptot_locales",
-            m.InvDescargaArchivo.filename.like(f"{prefix}%"),
-            m.InvDescargaArchivo.filename.ilike(f"%{suffix}"),
-        )
-        .order_by(m.InvDescargaArchivo.created_at.desc())
-        .limit(1)
+    request_key = dl_svc.build_export_request_key(
+        "reporte_aptot_locales",
+        tenant_id,
+        {"establishment_id": int(establishment_id), "export_format": fmt},
+    )
+    shared = dl_svc.get_shared_export_meta(
+        db,
+        tenant_id=tenant_id,
+        module="reporte_aptot_locales",
+        request_key=request_key,
+        extra={"export_format": fmt},
     )
 
-    base: dict[str, Any] = {
+    # Fallback para jobs antiguos sin request_key (por prefijo de filename).
+    if shared.get("status") == "none":
+        from sqlalchemy import select
+
+        suffix = ".xlsx" if fmt == "xlsx" else ".csv"
+        prefix = f"reporte_aptot_locales_{establishment_id}_"
+        job = db.scalar(
+            select(m.InvDescargaArchivo)
+            .where(
+                m.InvDescargaArchivo.tenant_id == tenant_id,
+                m.InvDescargaArchivo.module == "reporte_aptot_locales",
+                m.InvDescargaArchivo.filename.like(f"{prefix}%"),
+                m.InvDescargaArchivo.filename.ilike(f"%{suffix}"),
+            )
+            .order_by(m.InvDescargaArchivo.created_at.desc())
+            .limit(1)
+        )
+        if job is not None:
+            generated_at = job.updated_at if job.state == "success" else job.created_at
+            shared = {
+                **shared,
+                "status": job.state,
+                "job_id": str(job.id),
+                "progress": int(job.progress or 0),
+                "message": job.message or "",
+                "filename": job.filename,
+                "download_url": job.download_url if job.state == "success" else None,
+                "file_size_bytes": job.file_size_bytes,
+                "generated_at": generated_at.isoformat() if generated_at else None,
+                "expires_at": job.expires_at.isoformat() if job.expires_at else None,
+                "reused_available": job.state in ("pending", "processing", "success"),
+            }
+
+    return {
         "establishment_id": int(est.id),
         "establishment_code": str(est.code or ""),
         "establishment_description": est.description,
         "export_format": fmt,
-        "status": "none",
-        "job_id": None,
-        "progress": 0,
-        "message": f"No hay reporte {suffix.lstrip('.').upper()} generado para este local.",
-        "filename": None,
-        "download_url": None,
-        "file_size_bytes": None,
-        "generated_at": None,
-        "expires_at": None,
-    }
-    if job is None:
-        return base
-
-    generated_at = job.updated_at if job.state == "success" else job.created_at
-    return {
-        **base,
-        "status": job.state,
-        "job_id": str(job.id),
-        "progress": int(job.progress or 0),
-        "message": job.message or "",
-        "filename": job.filename,
-        "download_url": job.download_url,
-        "file_size_bytes": job.file_size_bytes,
-        "generated_at": generated_at.isoformat() if generated_at else None,
-        "expires_at": job.expires_at.isoformat() if job.expires_at else None,
+        "status": shared.get("status") or "none",
+        "job_id": shared.get("job_id"),
+        "progress": int(shared.get("progress") or 0),
+        "message": shared.get("message") or "",
+        "filename": shared.get("filename"),
+        "download_url": shared.get("download_url"),
+        "file_size_bytes": shared.get("file_size_bytes"),
+        "generated_at": shared.get("generated_at"),
+        "expires_at": shared.get("expires_at"),
     }
 
 

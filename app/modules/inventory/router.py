@@ -12,9 +12,11 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user, get_db, get_tenant_id
 from app.core.export_storage import read_export_file
+from app.core.inventory_numbers import format_inv_num
 from app.modules.iam.dependencies import require_permission
 from app.modules.iam.models import User
 from app.modules.inventory import conciliation as conc
+from app.modules.inventory import conciliacion_margesi_service as conc_margesi
 from app.modules.inventory import conciliation_import_report_pdf as conc_import_pdf
 from app.modules.inventory import cost_center_import as cc_import
 from app.modules.inventory import list_sbn_import as list_sbn_import_mod
@@ -45,6 +47,8 @@ from app.modules.inventory.schemas import (
     ConciliationFilters,
     DescargaArchivoStartResponse,
     DescargaArchivoStatus,
+    MargesiExportMeta,
+    SharedExportMeta,
     ConciliationPairWrite,
     ConciliationSbnWrite,
     ConciliationImportReportRequest,
@@ -81,6 +85,7 @@ from app.modules.inventory.schemas import (
     InventoryNumWrite,
     ItemCardTablesResponse,
     ItemPhotoUploadResult,
+    PersonPhotoUploadResult,
     ItemCardTranslate,
     ItemPhotoQuery,
     ItemPhotoRow,
@@ -96,6 +101,10 @@ from app.modules.inventory.schemas import (
     PersonImportResult,
     RecordQuery,
     UserInventoryConf,
+    ConciliacionMargesiSummary,
+    ConciliacionMargesiConfirm,
+    ConciliacionMargesiFixFlag,
+    ConciliacionMargesiPropuestasResponse,
 )
 
 router = APIRouter(prefix="/inventory", tags=["inventory"])
@@ -103,14 +112,44 @@ router.include_router(attendance_router)
 router.include_router(mobile_router)
 
 
-def _csv_export_route(module: str, permission_code: str):
+def _csv_export_route(
+    module: str,
+    permission_code: str,
+    *,
+    sheet_title: str | None = None,
+):
     def _endpoint(
         db: Session = Depends(get_db),
         tenant_id: UUID = Depends(get_tenant_id),
         _: User = Depends(require_permission(permission_code, "export")),
+        export_format: Literal["csv", "xlsx"] = Query(
+            "csv",
+            description="csv = texto; xlsx = Excel con cabecera en color del tenant",
+        ),
     ):
+        fmt = (export_format or "csv").strip().lower()
+        if fmt not in ("csv", "xlsx"):
+            fmt = "csv"
         try:
             inner_sql, filename_base = get_export_query(module)
+            if fmt == "xlsx":
+                from app.modules.inventory.csv_export import copy_query_to_csv_bytes
+                from app.modules.inventory.excel_styled_export import csv_bytes_to_styled_xlsx_bytes
+                from app.modules.tenants.theme import primary_hex_openpyxl
+
+                payload = copy_query_to_csv_bytes(inner_sql, (str(tenant_id),))
+                content = csv_bytes_to_styled_xlsx_bytes(
+                    payload,
+                    column_formats={"fecha_creacion": "datetime"},
+                    sheet_title=(sheet_title or filename_base.replace("_", " ").title())[:31],
+                    header_color_hex=primary_hex_openpyxl(tenant_id),
+                )
+                filename = f"{filename_base}_{date.today().isoformat()}.xlsx"
+                return Response(
+                    content=content,
+                    media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+                )
             return csv_download_response(
                 db,
                 tenant_id=tenant_id,
@@ -120,9 +159,14 @@ def _csv_export_route(module: str, permission_code: str):
         except ValueError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except Exception as exc:  # noqa: BLE001
-            raise HTTPException(status_code=500, detail=f"Error al exportar CSV: {exc}") from exc
+            raise HTTPException(status_code=500, detail=f"Error al exportar: {exc}") from exc
 
     return _endpoint
+
+
+def _establishments_export_route():
+    """Compat: locales usa el mismo export CSV/XLSX estilizado."""
+    return _csv_export_route("establishments", "locales", sheet_title="Locales")
 
 
 def _q(
@@ -140,6 +184,9 @@ def _q(
         description="Margesi: C conciliados, F faltantes, N no inventariable. Bienes: C/S",
     ),
     local_code: str | None = Query(None, description="Filtrar margesi por amb_cod = código de local"),
+    estado_filter: Literal["B", "R", "M"] | None = Query(
+        None, description="Margesi: estado de conservación (B incluye N; R incluye I)"
+    ),
     export_layout: Literal["full", "report"] | None = Query(
         None,
         description="Export margesi: full=todas las columnas; report=layout operativo",
@@ -158,6 +205,7 @@ def _q(
         flag_firma=flag_firma,
         inv_sit_filter=inv_sit_filter,
         local_code=local_code,
+        estado_filter=estado_filter,
         export_layout=export_layout,
         reporte=reporte,
     )
@@ -295,7 +343,7 @@ def establishments_records(
 
 router.add_api_route(
     "/establishments/export",
-    _csv_export_route("establishments", "locales"),
+    _establishments_export_route(),
     methods=["GET"],
     tags=["inventory"],
 )
@@ -439,7 +487,7 @@ def persons_records(db: Session = Depends(get_db), tenant_id: UUID = Depends(get
 
 router.add_api_route(
     "/persons/export",
-    _csv_export_route("persons", "personas"),
+    _csv_export_route("persons", "personas", sheet_title="Personas"),
     methods=["GET"],
     tags=["inventory"],
 )
@@ -467,6 +515,31 @@ def person_save(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     return OkPayload(success=True, message="Persona guardada", id=row.id)
+
+
+@router.post("/persons/photo", response_model=PersonPhotoUploadResult)
+async def person_photo_upload(
+    file: UploadFile = File(...),
+    tenant_id: UUID = Depends(get_tenant_id),
+    _: User = Depends(get_current_user),
+):
+    url = await _upload_public_photo("person", file, tenant_id)
+    return PersonPhotoUploadResult(success=True, message="Foto subida", url=url)
+
+
+async def _upload_public_photo(kind, file: UploadFile, tenant_id: UUID) -> str:
+    from app.core.public_photo_storage import MAX_PHOTO_BYTES, upload_photo
+
+    content = await file.read(MAX_PHOTO_BYTES + 1)
+    try:
+        return upload_photo(kind, tenant_id=tenant_id, content=content)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail="No se pudo guardar la foto. Revise la configuración de almacenamiento (GCS).",
+        ) from exc
 
 
 @router.delete("/persons/{row_id}", response_model=OkPayload)
@@ -524,7 +597,7 @@ def cost_centers_records(
 
 router.add_api_route(
     "/cost-centers/export",
-    _csv_export_route("cost_centers", "centro_costo"),
+    _csv_export_route("cost_centers", "centro_costo", sheet_title="Centros de costo"),
     methods=["GET"],
     tags=["inventory"],
 )
@@ -606,7 +679,7 @@ def environments_records(
 
 router.add_api_route(
     "/environments/export",
-    _csv_export_route("environments", "ambientes"),
+    _csv_export_route("environments", "ambientes", sheet_title="Ambientes"),
     methods=["GET"],
     tags=["inventory"],
 )
@@ -702,6 +775,16 @@ def hoja_captura_export_start(
     )
 
 
+@router.get("/hoja-captura/export-meta", response_model=SharedExportMeta)
+def hoja_captura_export_meta(
+    db: Session = Depends(get_db),
+    tenant_id: UUID = Depends(get_tenant_id),
+    _: User = Depends(require_permission("hoja_captura", "export")),
+    q: RecordQuery = Depends(_q),
+):
+    return SharedExportMeta(**dl_svc.get_hoja_captura_export_meta(db, tenant_id=tenant_id, q=q))
+
+
 @router.get("/hoja-captura/export")
 def hoja_captura_export_get_not_allowed():
     raise HTTPException(
@@ -758,10 +841,15 @@ def card_add_item(
     tenant_id: UUID = Depends(get_tenant_id),
     user: User = Depends(get_current_user),
 ):
-    ok, msg = inv.store_card_item(db, tenant_id, card_id, body, operator_id=user.id)
-    if not ok:
-        raise HTTPException(status_code=400, detail=msg)
-    return OkPayload(success=True, message=msg)
+    result = inv.store_card_item(db, tenant_id, card_id, body, operator_id=user.id)
+    if not result.ok:
+        raise HTTPException(status_code=400, detail=result.message)
+    return OkPayload(
+        success=True,
+        message=result.message,
+        id=result.item_id,
+        inv_num=format_inv_num(result.inv_num) if result.inv_num is not None else None,
+    )
 
 
 @router.post("/cards/recount-items", response_model=OkPayload)
@@ -932,6 +1020,7 @@ def hoja_captura_item_record(
         per_page=min(q.per_page, 500),
         column="id_card",
         value=str(card_id),
+        search=q.search,
         column_ord=q.column_ord or "id",
         ord_tipo=q.ord_tipo,
     )
@@ -947,10 +1036,15 @@ def hoja_captura_edit_item(
     tenant_id: UUID = Depends(get_tenant_id),
     user: User = Depends(get_current_user),
 ):
-    ok, msg = inv.edit_card_item(db, tenant_id, body, operator_id=user.id)
-    if not ok:
-        raise HTTPException(status_code=400, detail=msg)
-    return OkPayload(success=True, message=msg)
+    result = inv.edit_card_item(db, tenant_id, body, operator_id=user.id)
+    if not result.ok:
+        raise HTTPException(status_code=400, detail=result.message)
+    return OkPayload(
+        success=True,
+        message=result.message,
+        id=result.item_id,
+        inv_num=format_inv_num(result.inv_num) if result.inv_num is not None else None,
+    )
 
 
 @router.post("/hoja-captura/move/{item_id}", response_model=OkPayload)
@@ -1110,6 +1204,24 @@ def item_cards_export_start(
     )
 
 
+@router.get("/item-cards/export-meta", response_model=SharedExportMeta)
+def item_cards_export_meta(
+    db: Session = Depends(get_db),
+    tenant_id: UUID = Depends(get_tenant_id),
+    _: User = Depends(require_permission("bienes", "export")),
+    q: RecordQuery = Depends(_q),
+    export_format: Literal["csv", "xlsx"] = Query("csv"),
+):
+    return SharedExportMeta(
+        **dl_svc.get_item_cards_export_meta(
+            db,
+            tenant_id=tenant_id,
+            q=q,
+            export_format=export_format,
+        ),
+    )
+
+
 @router.get("/item-cards/export")
 def item_cards_export_get_not_allowed():
     """Evita que GET /export caiga en ``/item-cards/{row_id}`` con row_id='export'."""
@@ -1185,7 +1297,7 @@ def list_sbn_records(db: Session = Depends(get_db), tenant_id: UUID = Depends(ge
 
 router.add_api_route(
     "/list-sbn/export",
-    _csv_export_route("list_sbn", "list_sbn"),
+    _csv_export_route("list_sbn", "list_sbn", sheet_title="Catalogo SBN"),
     methods=["GET"],
     tags=["inventory"],
 )
@@ -1276,7 +1388,11 @@ def margesi_export_start(
     q: RecordQuery = Depends(_q),
     export_format: Literal["csv", "xlsx"] = Query("csv", description="Formato del archivo: csv o xlsx"),
 ):
-    """Encola exportación Margesi: Celery genera CSV/XLSX, lo sube a GCS y guarda URL en ``descarga_archivos``."""
+    """Encola exportación Margesi: Celery genera CSV/XLSX, lo sube a GCS y guarda URL en ``descarga_archivos``.
+
+    Si ya existe un job pendiente/procesando o un archivo vigente con los mismos filtros,
+    reutiliza ese ``job_id`` (no genera de nuevo).
+    """
     return DescargaArchivoStartResponse(
         **dl_svc.schedule_margesi_export(
             db,
@@ -1284,6 +1400,25 @@ def margesi_export_start(
             q=q,
             export_format=export_format,
             created_by_id=user.id,
+        ),
+    )
+
+
+@router.get("/margesi/export-meta", response_model=MargesiExportMeta)
+def margesi_export_meta(
+    db: Session = Depends(get_db),
+    tenant_id: UUID = Depends(get_tenant_id),
+    _: User = Depends(require_permission("margesi", "export")),
+    q: RecordQuery = Depends(_q),
+    export_format: Literal["csv", "xlsx"] = Query("csv", description="Formato del archivo: csv o xlsx"),
+):
+    """Estado compartido de exportación Margesi para los filtros actuales (visible a todo el tenant)."""
+    return MargesiExportMeta(
+        **dl_svc.get_margesi_export_meta(
+            db,
+            tenant_id=tenant_id,
+            q=q,
+            export_format=export_format,
         ),
     )
 
@@ -1322,6 +1457,16 @@ def margesi_get(row_id: int, db: Session = Depends(get_db), tenant_id: UUID = De
     if not row or row.tenant_id != tenant_id:
         raise HTTPException(status_code=404, detail="No encontrado")
     return margesi_row_to_api(row)
+
+
+@router.post("/margesi/photo", response_model=PersonPhotoUploadResult)
+async def margesi_photo_upload(
+    file: UploadFile = File(...),
+    tenant_id: UUID = Depends(get_tenant_id),
+    _: User = Depends(get_current_user),
+):
+    url = await _upload_public_photo("margesi", file, tenant_id)
+    return PersonPhotoUploadResult(success=True, message="Foto subida", url=url)
 
 
 @router.post("/margesi", response_model=OkPayload)
@@ -1699,6 +1844,25 @@ def reporte_locales_bulk_download_start(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@router.post("/reporte-locales/download/bulk-meta", response_model=SharedExportMeta)
+def reporte_locales_bulk_download_meta(
+    body: ReporteLocalBulkDownloadRequest,
+    db: Session = Depends(get_db),
+    tenant_id: UUID = Depends(get_tenant_id),
+    _: User = Depends(require_permission("reporte_locales", "view")),
+):
+    return SharedExportMeta(
+        **reporte_locales_dl.get_bulk_download_meta(
+            db,
+            tenant_id=tenant_id,
+            establishment_ids=body.establishment_ids,
+            department_id=body.department_id,
+            include_fotos=body.include_fotos,
+            include_pdfs=body.include_pdfs,
+        ),
+    )
+
+
 @router.get("/reporte-locales/download/bulk/{job_id}", response_model=DescargaArchivoStatus)
 def reporte_locales_bulk_download_status(
     job_id: UUID,
@@ -1790,6 +1954,22 @@ def reporte_aptot_export_start(
             export_format=export_format,
             created_by_id=user.id,
         )
+    )
+
+
+@router.get("/reporte-aptot/export-meta", response_model=SharedExportMeta)
+def reporte_aptot_export_meta(
+    db: Session = Depends(get_db),
+    tenant_id: UUID = Depends(get_tenant_id),
+    _: User = Depends(require_permission("reporte_aptot", "export")),
+    export_format: Literal["csv", "xlsx"] = Query("csv"),
+):
+    return SharedExportMeta(
+        **dl_svc.get_reporte_aptot_export_meta(
+            db,
+            tenant_id=tenant_id,
+            export_format=export_format,
+        ),
     )
 
 
@@ -2050,6 +2230,101 @@ def conciliation_desconciliacion_sbn_bienes(
 ):
     rows, total = conc.list_desconciliacion_sbn_bienes(db, tenant_id, q)
     return PagedRows(data=rows, meta=PagedMeta(**inv.paged_meta(total, q.page, q.per_page)))
+
+
+# --- Conciliación Margesi (detección / propuestas) ---
+
+
+@router.get("/conciliacion-margesi/summary", response_model=ConciliacionMargesiSummary)
+def conciliacion_margesi_summary(
+    db: Session = Depends(get_db),
+    tenant_id: UUID = Depends(get_tenant_id),
+    _: User = Depends(get_current_user),
+):
+    return ConciliacionMargesiSummary(**conc_margesi.summary(db, tenant_id))
+
+
+@router.get("/conciliacion-margesi/inconsistencias")
+def conciliacion_margesi_inconsistencias(
+    db: Session = Depends(get_db),
+    tenant_id: UUID = Depends(get_tenant_id),
+    _: User = Depends(get_current_user),
+):
+    flags = conc_margesi.list_flag_inconsistencies(db, tenant_id)
+    sin = conc_margesi.list_bien_conciliado_sin_margesi(db, tenant_id)
+    return {"data": flags + sin, "meta": {"total": len(flags) + len(sin)}}
+
+
+@router.get("/conciliacion-margesi/propuestas", response_model=ConciliacionMargesiPropuestasResponse)
+def conciliacion_margesi_propuestas(
+    db: Session = Depends(get_db),
+    tenant_id: UUID = Depends(get_tenant_id),
+    _: User = Depends(get_current_user),
+    page: int = Query(1, ge=1),
+    per_page: int = Query(25, ge=1, le=100),
+    tier: str | None = Query(None, description="fuerte | probable | revisar"),
+    local_code: str | None = Query(None),
+    sbn: str | None = Query(None),
+    search: str | None = Query(None),
+):
+    rows, counts = conc_margesi.build_match_proposals(
+        db,
+        tenant_id,
+        local_code=local_code,
+        sbn=sbn,
+        tier=tier,
+        search=search,
+        limit=per_page,
+        offset=(page - 1) * per_page,
+    )
+    total = int(counts.get("propuestas_total") or 0)
+    return ConciliacionMargesiPropuestasResponse(
+        data=rows,
+        meta=PagedMeta(**inv.paged_meta(total, page, per_page)),
+        counts={
+            "fuerte": int(counts.get("fuerte") or 0),
+            "probable": int(counts.get("probable") or 0),
+            "revisar": int(counts.get("revisar") or 0),
+            "propuestas_total": total,
+            "faltantes_evaluados": int(counts.get("faltantes_evaluados") or 0),
+        },
+    )
+
+
+@router.post("/conciliacion-margesi/confirm", response_model=OkPayload)
+def conciliacion_margesi_confirm(
+    body: ConciliacionMargesiConfirm,
+    db: Session = Depends(get_db),
+    tenant_id: UUID = Depends(get_tenant_id),
+    user: User = Depends(get_current_user),
+):
+    ok, msg = conc_margesi.confirm_proposal(
+        db,
+        tenant_id,
+        body.margesi_id,
+        body.itemcard_id,
+        user_id=user.id,
+        observacion=body.observacion,
+        evidencias=body.evidencias,
+    )
+    if not ok:
+        raise HTTPException(status_code=400, detail=msg)
+    return OkPayload(success=True, message=msg)
+
+
+@router.post("/conciliacion-margesi/fix-flag", response_model=OkPayload)
+def conciliacion_margesi_fix_flag(
+    body: ConciliacionMargesiFixFlag,
+    db: Session = Depends(get_db),
+    tenant_id: UUID = Depends(get_tenant_id),
+    user: User = Depends(get_current_user),
+):
+    ok, msg = conc_margesi.fix_flag_inconsistency(
+        db, tenant_id, body.margesi_id, user_id=user.id
+    )
+    if not ok:
+        raise HTTPException(status_code=400, detail=msg)
+    return OkPayload(success=True, message=msg)
 
 
 @router.post("/conciliation", response_model=OkPayload)

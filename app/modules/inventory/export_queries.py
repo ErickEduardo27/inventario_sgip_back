@@ -351,7 +351,26 @@ EXPORT_QUERIES.update({
             c.itemcard_id AS "itemcard id",
             COALESCE(
                 NULLIF(TRIM(COALESCE(c.mar_sit_conta, '')), ''),
-                NULLIF(TRIM(COALESCE(ma.mar_sit_conta, '')), '')
+                NULLIF(TRIM(COALESCE((
+                    SELECT ma.mar_sit_conta
+                    FROM margesi ma
+                    WHERE ma.tenant_id = c.tenant_id
+                      AND (
+                        (c.source_kind = 'faltante' AND ma.id = c.source_ref_id)
+                        OR (
+                            c.source_kind IS DISTINCT FROM 'faltante'
+                            AND c.itemcard_id IS NOT NULL
+                            AND ma.id = (
+                                SELECT ic.id_margesi
+                                FROM itemcards ic
+                                WHERE ic.id = c.itemcard_id
+                                  AND ic.tenant_id = c.tenant_id
+                                LIMIT 1
+                            )
+                        )
+                      )
+                    LIMIT 1
+                ), '')), '')
             ) AS "mar sit conta",
             c.mar_cpat AS "mar cpat",
             c.state,
@@ -418,15 +437,6 @@ EXPORT_QUERIES.update({
             c.campo_libre AS "campo libre",
             c.refreshed_at AS "refreshed at"
         FROM reporte_aptot_cache c
-        LEFT JOIN itemcards ic
-            ON ic.id = c.itemcard_id
-           AND ic.tenant_id = c.tenant_id
-        LEFT JOIN margesi ma
-            ON ma.tenant_id = c.tenant_id
-           AND (
-                (c.source_kind = 'faltante' AND ma.id = c.source_ref_id)
-                OR (c.source_kind IS DISTINCT FROM 'faltante' AND ma.id = ic.id_margesi)
-           )
         WHERE c.tenant_id = %s::uuid
         ORDER BY c.source_kind, c.source_ref_id
         """,

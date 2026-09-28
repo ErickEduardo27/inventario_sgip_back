@@ -15,6 +15,7 @@ class OkPayload(BaseModel):
     success: bool = True
     message: str = ""
     id: int | None = None
+    inv_num: str | None = None
 
 
 class PagedMeta(BaseModel):
@@ -253,6 +254,10 @@ class RecordQuery(BaseModel):
         default=None,
         description="Filtrar margesi donde amb_cod coincide con el código del local",
     )
+    estado_filter: Literal["B", "R", "M"] | None = Field(
+        default=None,
+        description="Margesi: estado de conservación; B incluye N (nuevo) y R incluye I, como en el listado",
+    )
     export_layout: Literal["full", "report"] | None = Field(
         default=None,
         description="Export margesi: full=todas las columnas; report=layout operativo",
@@ -294,6 +299,15 @@ class InventoryDashboardKpis(BaseModel):
     margesi_total: int
     bienes_prev_total: int = 0
     margesi_pendientes: int = 0
+    # Totales desde cache por local (stock actual; filtra por establishment_id si aplica)
+    margesi_total_stock: int = 0
+    margesi_conciliado: int = 0
+    margesi_faltantes: int = 0
+    margesi_no_inventariable: int = 0
+    inventario_total_stock: int = 0
+    inventario_conciliado: int = 0
+    inventario_sobrante: int = 0
+    inventario_no_conciliable: int = 0
 
 
 class InventoryUserRegistrationStat(BaseModel):
@@ -706,6 +720,7 @@ class DescargaArchivoStartResponse(BaseModel):
     async_job: bool = True
     job_id: str
     message: str = ""
+    reused: bool = False
 
 
 class DescargaArchivoStatus(BaseModel):
@@ -721,6 +736,27 @@ class DescargaArchivoStatus(BaseModel):
     expires_at: str | None = None
     errors: list[str] = Field(default_factory=list)
     message: str = ""
+
+
+class MargesiExportMeta(BaseModel):
+    """Estado compartido de exportación (Margesi y otros módulos async)."""
+
+    export_format: str | None = None
+    export_layout: str | None = None
+    status: str = "none"
+    job_id: str | None = None
+    progress: int = 0
+    message: str = ""
+    filename: str | None = None
+    download_url: str | None = None
+    file_size_bytes: int | None = None
+    generated_at: str | None = None
+    expires_at: str | None = None
+    reused_available: bool = False
+
+
+# Alias genérico para otros módulos
+SharedExportMeta = MargesiExportMeta
 
 
 class EstablishmentImportJobStatus(BaseModel):
@@ -775,8 +811,46 @@ class MargesiLookupResult(BaseModel):
     card_info: dict[str, Any] | None = None
 
 
+class PersonPhotoUploadResult(BaseModel):
+    success: bool = True
+    message: str = ""
+    url: str
+
+
 class ItemPhotoUploadResult(BaseModel):
     success: bool = True
     message: str = ""
     filename: str | None = None
     url: str | None = None
+
+
+# --- Conciliación Margesi (propuestas) ---
+
+
+class ConciliacionMargesiSummary(BaseModel):
+    faltantes_no_conciliados: int = 0
+    sobrantes_candidatos: int = 0
+    coincidencias_fuertes: int = 0
+    coincidencias_probables: int = 0
+    coincidencias_revisar: int = 0
+    inconsistencias_directas: int = 0
+    inconsistencias_flag: int = 0
+    inconsistencias_bien_sin_margesi: int = 0
+    matches_pending: bool = False
+
+
+class ConciliacionMargesiPropuestasResponse(BaseModel):
+    data: list[dict[str, Any]]
+    meta: PagedMeta
+    counts: dict[str, int] = Field(default_factory=dict)
+
+
+class ConciliacionMargesiConfirm(BaseModel):
+    margesi_id: int
+    itemcard_id: int
+    observacion: str | None = None
+    evidencias: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class ConciliacionMargesiFixFlag(BaseModel):
+    margesi_id: int

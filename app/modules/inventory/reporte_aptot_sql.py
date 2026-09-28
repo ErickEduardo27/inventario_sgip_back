@@ -577,4 +577,5 @@ INSERT INTO reporte_aptot_cache (
 UNION ALL
 
 {_MARGESI_FALTANTE_SELECT}
+ON CONFLICT (tenant_id, source_kind, source_ref_id) DO NOTHING
 """

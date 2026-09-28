@@ -34,6 +34,7 @@ FEATURE_CATALOG: tuple[dict[str, str], ...] = (
     {"code": "reporte_aptot_locales", "name": "APTOT por locales", "group": "Reportes"},
     {"code": "reporte_locales", "name": "Reporte Locales", "group": "Reportes"},
     {"code": "conciliacion", "name": "Conciliación", "group": "Conciliación"},
+    {"code": "conciliacion_margesi", "name": "Conciliación Margesi", "group": "Conciliación"},
     {"code": "conciliacion_sbn", "name": "Conciliación SBN", "group": "Conciliación"},
     {"code": "desconciliacion", "name": "Desconciliación", "group": "Conciliación"},
     {"code": "desconciliacion_sbn", "name": "Desconciliación SBN", "group": "Conciliación"},

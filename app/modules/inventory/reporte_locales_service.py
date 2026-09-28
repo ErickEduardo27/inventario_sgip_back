@@ -292,13 +292,71 @@ def get_reporte_local_stats(
     tenant_id: UUID,
     establishment_id: int,
 ) -> dict[str, Any]:
-    from app.modules.inventory.dashboard_establishment_stats_cache import get_establishment_stats
+    """Totales del local con el mismo criterio que filtros Margesi / Bienes inventariados."""
+    from app.modules.inventory import service as inv
+    from app.modules.inventory.schemas import RecordQuery
 
     est = db.get(m.InvEstablishment, establishment_id)
     if not est or est.tenant_id != tenant_id:
         raise ValueError("Local no encontrado")
 
-    return get_establishment_stats(db, tenant_id, establishment_id, live=True)
+    code = str(est.code or "").strip()
+    margesi_cols = {"mar_cpat", "mar_num", "mar_des", "inv_sit", "inv_num", "amb_cod"}
+    item_cols = {"id", "inv_num", "inv_sit", "mar_cpat", "mar_des", "id_card"}
+
+    def _margesi_total(sit: str | None) -> int:
+        q = RecordQuery(
+            page=1,
+            per_page=1,
+            column="mar_cpat",
+            column_ord="id",
+            ord_tipo="asc",
+            local_code=code or None,
+            inv_sit_filter=sit,  # type: ignore[arg-type]
+        )
+        _, total = inv.list_margesi(db, tenant_id, q, margesi_cols)
+        return int(total)
+
+    def _inventario_total(sit: str | None) -> int:
+        q = RecordQuery(
+            page=1,
+            per_page=1,
+            column="inv_num",
+            column_ord="id",
+            ord_tipo="desc",
+            establishment_id=establishment_id,
+            inv_sit_filter=sit,  # type: ignore[arg-type]
+        )
+        _, total = inv.list_item_cards(db, tenant_id, q, item_cols)
+        return int(total)
+
+    # N en bienes no es filtro de UI; se cuenta igual que el cache (inv_sit = N).
+    invent_n = int(
+        db.scalar(
+            select(func.count())
+            .select_from(m.InvItemCard)
+            .where(
+                m.InvItemCard.tenant_id == tenant_id,
+                m.InvItemCard.inv_sit == "N",
+                inv._dashboard_itemcard_establishment_exists(establishment_id),
+            )
+        )
+        or 0
+    )
+
+    return {
+        "establishment_id": int(est.id),
+        "establishment_code": code,
+        "establishment_description": est.description,
+        "margesi_total": _margesi_total(None),
+        "margesi_conciliado": _margesi_total("C"),
+        "margesi_faltantes": _margesi_total("F"),
+        "margesi_no_inventariable": _margesi_total("N"),
+        "inventario_total": _inventario_total(None),
+        "inventario_conciliado": _inventario_total("C"),
+        "inventario_sobrante": _inventario_total("S"),
+        "inventario_no_conciliable": invent_n,
+    }
 
 
 def _geo_description(db: Session, model: type, geo_id: str | None) -> str:
@@ -371,5 +429,15 @@ def build_acta_cierre_pdf(
         "sertec_cargo": body.sertec_cargo,
         "sertec_dni": body.sertec_dni,
         "observaciones": observaciones,
+        "primary_hex": _tenant_primary_hex(db, tenant_id),
     }
     return generate_acta_cierre_pdf(payload)
+
+
+def _tenant_primary_hex(db: Session, tenant_id: UUID) -> str:
+    from app.modules.settings.service import SettingsService
+    from app.modules.tenants.theme import parse_theme
+
+    settings = SettingsService(db).get_settings(tenant_id)
+    theme = parse_theme(settings.portal_branding, logo_url=settings.logo_url)
+    return theme.primary_hex
