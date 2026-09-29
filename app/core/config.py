@@ -113,6 +113,43 @@ class Settings(BaseSettings):
         description="Backend de resultados Celery (ej. redis://127.0.0.1:6379/1). Vacío = mismo host que broker o deshabilitado según Celery.",
     )
 
+    # --- Exportaciones (ver app/modules/exports) ---
+    export_redis_url: str = Field(
+        default="",
+        description="Redis para estado, progreso y avisos de exportaciones. Vacío = el mismo del broker Celery.",
+    )
+    export_celery_queue: str = Field(
+        default="",
+        description="Cola Celery dedicada a exportaciones (ej. 'exports'). Vacío = cola por defecto. "
+        "Si se define, levante un worker con: celery -A app.celery_app:celery_app worker -Q exports -c 2",
+    )
+    export_execution: str = Field(
+        default="celery",
+        description="'celery' (producción) o 'thread' (desarrollo sin worker: genera en un hilo del API).",
+    )
+    export_max_active_per_user: int = Field(
+        default=1,
+        ge=1,
+        le=10,
+        description="Exportaciones nuevas que un usuario puede tener en curso a la vez (sumarse a una ajena no cuenta).",
+    )
+    export_reuse_minutes: int = Field(
+        default=60,
+        ge=0,
+        le=24 * 60,
+        description="Minutos en que un archivo ya generado con los mismos filtros se ofrece para descargar (0 = nunca).",
+    )
+    export_pending_timeout_minutes: int = Field(
+        default=30,
+        ge=1,
+        description="Minutos en cola sin que un worker la tome antes de darla por perdida.",
+    )
+    export_stale_minutes: int = Field(
+        default=10,
+        ge=1,
+        description="Minutos sin latido del worker antes de dar por interrumpida una exportación en proceso.",
+    )
+
     gcs_bucket: str = Field(
         default="",
         description="Bucket de Google Cloud Storage para archivos de importación. Vacío = almacenamiento local temporal (solo desarrollo).",

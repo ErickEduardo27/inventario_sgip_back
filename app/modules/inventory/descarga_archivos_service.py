@@ -333,27 +333,14 @@ def schedule_reporte_aptot_export(
     export_format: str = "csv",
     created_by_id: UUID | None = None,
 ) -> dict[str, Any]:
-    from app.tasks.csv_exports import export_reporte_aptot_csv_task
-
-    fmt = _normalize_export_format(export_format)
-    ext = "xlsx" if fmt == "xlsx" else "csv"
-    request_key = build_export_request_key(
-        "reporte_aptot",
-        tenant_id,
-        {"export_format": fmt},
-    )
-    label = "APTOT Excel" if fmt == "xlsx" else "APTOT CSV"
-    return enqueue_shared_export(
+    return _delegate_to_exports(
         db,
-        tenant_id=tenant_id,
         module="reporte_aptot",
-        request_key=request_key,
-        filename=f"reporte_aptot_export_{date.today().isoformat()}.{ext}",
+        tenant_id=tenant_id,
         created_by_id=created_by_id,
-        label=label,
-        enqueue_celery=lambda job_id: export_reporte_aptot_csv_task.delay(str(job_id), str(tenant_id), fmt),
+        filters={},
+        export_format=_normalize_export_format(export_format),
     )
-
 
 def get_reporte_aptot_export_meta(
     db: Session,
@@ -381,37 +368,18 @@ def schedule_reporte_aptot_locales_export(
     created_by_id: UUID | None = None,
 ) -> dict[str, Any]:
     from app.modules.inventory import models as m
-    from app.tasks.csv_exports import export_reporte_aptot_locales_csv_task
 
     est = db.get(m.InvEstablishment, establishment_id)
     if not est or est.tenant_id != tenant_id:
         raise ValueError("Local no encontrado")
-
-    fmt = _normalize_export_format(export_format)
-    ext = "xlsx" if fmt == "xlsx" else "csv"
-    code = str(est.code or establishment_id).strip() or str(establishment_id)
-    request_key = build_export_request_key(
-        "reporte_aptot_locales",
-        tenant_id,
-        {"establishment_id": int(establishment_id), "export_format": fmt},
-    )
-    label = f"APTOT local ({ 'Excel' if fmt == 'xlsx' else 'CSV' })"
-    return enqueue_shared_export(
+    return _delegate_to_exports(
         db,
-        tenant_id=tenant_id,
         module="reporte_aptot_locales",
-        request_key=request_key,
-        filename=f"reporte_aptot_locales_{establishment_id}_{code}_{date.today().isoformat()}.{ext}",
+        tenant_id=tenant_id,
         created_by_id=created_by_id,
-        label=label,
-        enqueue_celery=lambda job_id: export_reporte_aptot_locales_csv_task.delay(
-            str(job_id),
-            str(tenant_id),
-            int(establishment_id),
-            fmt,
-        ),
+        filters={"establishment_id": int(establishment_id)},
+        export_format=_normalize_export_format(export_format),
     )
-
 
 def schedule_item_cards_export(
     db: Session,
@@ -421,30 +389,14 @@ def schedule_item_cards_export(
     export_format: str = "csv",
     created_by_id: UUID | None = None,
 ) -> dict[str, Any]:
-    from app.tasks.csv_exports import export_item_cards_csv_task
-
-    fmt = _normalize_export_format(export_format)
-    ext = "xlsx" if fmt == "xlsx" else "csv"
-    request_key = build_export_request_key(
-        "item_cards",
-        tenant_id,
-        record_query_export_payload(q, extra={"export_format": fmt}),
-    )
-    query_dict = q.model_dump(mode="json")
-    label = "bienes Excel" if fmt == "xlsx" else "bienes CSV"
-    return enqueue_shared_export(
+    return _delegate_to_exports(
         db,
-        tenant_id=tenant_id,
         module="item_cards",
-        request_key=request_key,
-        filename=f"bienes_inventariados_export_{date.today().isoformat()}.{ext}",
+        tenant_id=tenant_id,
         created_by_id=created_by_id,
-        label=label,
-        enqueue_celery=lambda job_id: export_item_cards_csv_task.delay(
-            str(job_id), str(tenant_id), query_dict, fmt
-        ),
+        filters=q.model_dump(mode="json"),
+        export_format=_normalize_export_format(export_format),
     )
-
 
 def get_item_cards_export_meta(
     db: Session,
@@ -476,30 +428,14 @@ def schedule_margesi_export(
     export_format: str = "csv",
     created_by_id: UUID | None = None,
 ) -> dict[str, Any]:
-    from app.tasks.csv_exports import export_margesi_csv_task
-
-    fmt = _normalize_export_format(export_format)
-    layout = (getattr(q, "export_layout", None) or "full").strip().lower()
-    if layout not in ("full", "report"):
-        layout = "full"
-    base = "margesi_reporte" if layout == "report" else "margesi_export"
-    ext = "xlsx" if fmt == "xlsx" else "csv"
-    request_key = build_margesi_export_request_key(tenant_id, q, fmt)
-    query_dict = q.model_dump(mode="json")
-    label = "Margesi Excel" if fmt == "xlsx" else "Margesi CSV"
-    return enqueue_shared_export(
+    return _delegate_to_exports(
         db,
-        tenant_id=tenant_id,
         module="margesi",
-        request_key=request_key,
-        filename=f"{base}_{date.today().isoformat()}.{ext}",
+        tenant_id=tenant_id,
         created_by_id=created_by_id,
-        label=label,
-        enqueue_celery=lambda job_id: export_margesi_csv_task.delay(
-            str(job_id), str(tenant_id), query_dict, fmt
-        ),
+        filters=q.model_dump(mode="json"),
+        export_format=_normalize_export_format(export_format),
     )
-
 
 def get_margesi_export_meta(
     db: Session,
@@ -529,27 +465,14 @@ def schedule_hoja_captura_export(
     q,
     created_by_id: UUID | None = None,
 ) -> dict[str, Any]:
-    from app.tasks.csv_exports import export_hoja_captura_task
-
-    request_key = build_export_request_key(
-        "hoja_captura",
-        tenant_id,
-        record_query_export_payload(q),
-    )
-    query_dict = q.model_dump(mode="json")
-    return enqueue_shared_export(
+    return _delegate_to_exports(
         db,
-        tenant_id=tenant_id,
         module="hoja_captura",
-        request_key=request_key,
-        filename=f"hoja_captura_export_{date.today().isoformat()}.xlsx",
+        tenant_id=tenant_id,
         created_by_id=created_by_id,
-        label="hoja de captura Excel",
-        enqueue_celery=lambda job_id: export_hoja_captura_task.delay(
-            str(job_id), str(tenant_id), query_dict
-        ),
+        filters=q.model_dump(mode="json"),
+        export_format="xlsx",
     )
-
 
 def get_hoja_captura_export_meta(
     db: Session,
@@ -570,8 +493,60 @@ def get_hoja_captura_export_meta(
     )
 
 
+def _delegate_to_exports(
+    db: Session,
+    *,
+    module: str,
+    tenant_id: UUID,
+    created_by_id: UUID | None,
+    filters: dict[str, Any],
+    export_format: str | None,
+) -> dict[str, Any]:
+    """Endpoints históricos → servicio unificado (misma deduplicación, límites y progreso en vivo)."""
+    from types import SimpleNamespace
+
+    from fastapi import HTTPException
+
+    from app.modules.exports import service as exports
+
+    try:
+        res = exports.request_export(
+            db,
+            module=module,
+            tenant_id=tenant_id,
+            user=SimpleNamespace(id=created_by_id),
+            filters=filters,
+            export_format=export_format,
+        )
+    except exports.ExportLimitError as exc:
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
+    job = res["job"]
+    status = res["status"]
+    if status == "joined":
+        msg = f"Otro usuario ya está generando esta exportación ({job['progress']}%). Te avisaremos cuando esté lista."
+    elif status == "available":
+        msg = "Se reutiliza el archivo generado recientemente con los mismos filtros."
+    else:
+        msg = "Exportación encolada."
+    return {"success": True, "async_job": True, "job_id": job["job_id"], "message": msg, "reused": status != "queued"}
+
+
 def get_descarga_archivo_status(db: Session, job_id: UUID, tenant_id: UUID) -> dict[str, Any]:
+    from app.modules.exports import live
+    from app.modules.exports import service as exports
+
     row = get_descarga_archivo(db, job_id, tenant_id)
     if row is None:
         raise LookupError("Trabajo de descarga no encontrado")
-    return job_to_status_payload(db, row)
+    if exports.is_stale(row):
+        exports.expire_stale(db, row)
+        db.commit()
+    payload = job_to_status_payload(db, row)
+    if row.state in ("pending", "processing"):
+        # El avance fino vive en Redis (la base solo registra transiciones).
+        overlay = live.read_job(row.id) or {}
+        if overlay.get("progress"):
+            payload["progress"] = max(payload["progress"], int(overlay["progress"]))
+        if overlay.get("message"):
+            payload["message"] = overlay["message"]
+    return payload

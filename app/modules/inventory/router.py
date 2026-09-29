@@ -2074,14 +2074,10 @@ def descarga_archivo_file(
     if row is None or row.state != "success" or not row.gcs_path:
         raise HTTPException(status_code=404, detail="Archivo no disponible")
 
-    module_perm: tuple[str, str] | None = {
-        "reporte_aptot": ("reporte_aptot", "export"),
-        "reporte_aptot_locales": ("reporte_aptot_locales", "export"),
-        "reporte_locales": ("reporte_locales", "view"),
-        "item_cards": ("bienes", "export"),
-        "hoja_captura": ("hoja_captura", "export"),
-        "margesi": ("margesi", "export"),
-    }.get(row.module)
+    from app.modules.exports.specs import SPECS
+
+    spec = SPECS.get(row.module)
+    module_perm: tuple[str, str] | None = spec.permission if spec else None
     if module_perm is None:
         raise HTTPException(status_code=404, detail="Archivo no disponible")
     code, action = module_perm

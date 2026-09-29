@@ -30,6 +30,7 @@ celery_app = Celery(
         "app.tasks.dashboard_establishment_stats",
         "app.tasks.csv_exports",
         "app.tasks.reporte_locales_downloads",
+        "app.tasks.exports",
     ],
 )
 

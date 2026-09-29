@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import mimetypes
 import re
+import shutil
 import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -63,6 +64,35 @@ def upload_export_file(
         return f"{LOCAL_PREFIX}{tmp.name}"
     finally:
         tmp.close()
+
+
+def upload_export_path(
+    *,
+    module: str,
+    tenant_id: UUID,
+    job_id: UUID,
+    filename: str,
+    file_path: str | Path,
+) -> str:
+    """Como ``upload_export_file`` pero desde un archivo en disco (sin cargarlo entero en memoria)."""
+    settings = get_settings()
+    source = Path(file_path)
+    if settings.gcs_bucket:
+        object_key = build_export_object_key(
+            module=module,
+            tenant_id=tenant_id,
+            job_id=job_id,
+            filename=filename,
+        )
+        client = _gcs_client()
+        blob = client.bucket(settings.gcs_bucket).blob(object_key)
+        blob.upload_from_filename(str(source), content_type=_content_type(filename))
+        return object_key
+
+    suffix = Path(filename).suffix or ".csv"
+    target = Path(tempfile.gettempdir()) / f"export_{module}_{job_id}{suffix}"
+    shutil.copyfile(source, target)
+    return f"{LOCAL_PREFIX}{target}"
 
 
 def read_export_file(storage_path: str) -> bytes:

@@ -2,6 +2,7 @@ from fastapi import APIRouter
 
 from app.api.tenant_context_router import router as tenant_context_router
 from app.modules.auth.router import router as auth_router
+from app.modules.exports.router import router as exports_router
 from app.modules.iam.router import router as iam_router
 from app.modules.inventory.public_router import router as inventory_public_router
 from app.modules.inventory.router import router as inventory_router
@@ -17,4 +18,5 @@ api_router.include_router(iam_router, prefix="/iam", tags=["iam"])
 api_router.include_router(templates_public_router, prefix="/public", tags=["public"])
 api_router.include_router(inventory_public_router, prefix="/public", tags=["public"])
 api_router.include_router(inventory_router, tags=["inventory"])
+api_router.include_router(exports_router)
 api_router.include_router(settings_router, prefix="/settings", tags=["settings"])
