@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Callable
 from uuid import UUID
 
+from app.db.copy_compat import copy_to, render_sql
 from app.modules.exports import live, service
 from app.modules.exports.specs import get_spec
 
@@ -69,7 +70,7 @@ class ExportContext:
         conn = engine.raw_connection()
         try:
             cur = conn.cursor()
-            cur.execute("SELECT count(*) FROM (" + inner_sql + ") AS export_count", params)
+            cur.execute(render_sql(conn, "SELECT count(*) FROM (" + inner_sql + ") AS export_count", params))
             (total,) = cur.fetchone()
             return int(total)
         except Exception:  # noqa: BLE001
@@ -97,16 +98,16 @@ class ExportContext:
         path = self.workdir / name
         conn = engine.raw_connection()
         try:
-            cur = conn.cursor()
-            copy_sql = cur.mogrify(
+            copy_sql = render_sql(
+                conn,
                 "COPY (" + inner_sql + ") TO STDOUT WITH (FORMAT CSV, HEADER TRUE, ENCODING 'UTF8')",
                 params,
-            ).decode("utf-8")
+            )
             with path.open("wb") as fh:
                 if bom:
                     fh.write(BOM)
                 writer = _ProgressWriter(fh, self, total=total, span=span, header_spaces=header_spaces)
-                cur.copy_expert(copy_sql, writer)
+                copy_to(conn, copy_sql, writer)
                 writer.flush()
             self.progress(span[1], f"{_fmt_int(writer.rows)} filas generadas", rows_done=writer.rows, rows_total=total)
         finally:
@@ -163,7 +164,7 @@ class _Heartbeat:
 
 
 class _ProgressWriter:
-    """Destino de ``copy_expert``: escribe en disco y reporta avance cada ``PROGRESS_EVERY_ROWS`` filas."""
+    """Destino del COPY: escribe en disco y reporta avance cada ``PROGRESS_EVERY_ROWS`` filas."""
 
     def __init__(self, fh, ctx: ExportContext, *, total: int | None, span: tuple[int, int], header_spaces: bool):
         self._fh = fh

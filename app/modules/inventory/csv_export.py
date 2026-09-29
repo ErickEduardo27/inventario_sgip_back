@@ -10,6 +10,7 @@ from uuid import UUID
 from fastapi.responses import Response
 from sqlalchemy.orm import Session
 
+from app.db.copy_compat import copy_to, render_sql
 from app.db.session import engine
 
 logger = logging.getLogger(__name__)
@@ -22,18 +23,17 @@ def copy_query_to_csv_bytes(inner_sql: str, params: tuple) -> bytes:
     conn = engine.raw_connection()
 
     try:
-        cur = conn.cursor()
-
-        copy_sql = cur.mogrify(
+        copy_sql = render_sql(
+            conn,
             "COPY (" + inner_sql + ") TO STDOUT WITH (FORMAT CSV, HEADER TRUE, ENCODING 'UTF8')",
             params,
-        ).decode("utf-8")
+        )
 
         buf = io.BytesIO()
 
         logger.info("INICIO EXPORT")
 
-        cur.copy_expert(copy_sql, buf)
+        copy_to(conn, copy_sql, buf)
 
         logger.info("COPY FINALIZADO")
 

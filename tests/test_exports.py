@@ -172,5 +172,42 @@ class PayloadTests(unittest.TestCase):
         self.assertFalse(service.job_payload(row, user_id=uuid.uuid4())["started_by_me"])
 
 
+class CopyCompatTests(unittest.TestCase):
+    """El COPY debe funcionar con psycopg2 (desarrollo) y psycopg 3 (producción)."""
+
+    def test_psycopg2_cursor(self):
+        from app.db import copy_compat
+
+        cur = mock.Mock(spec=["mogrify", "copy_expert", "close"])
+        cur.mogrify.return_value = b"COPY (SELECT 1) TO STDOUT"
+        cur.copy_expert.side_effect = lambda sql, dest: dest.write(b"a\n1\n")
+        conn = mock.Mock(cursor=mock.Mock(return_value=cur))
+        self.assertEqual(copy_compat.render_sql(conn, "COPY (SELECT %s) TO STDOUT", (1,)), "COPY (SELECT 1) TO STDOUT")
+        buf = io.BytesIO()
+        copy_compat.copy_to(conn, "COPY (SELECT 1) TO STDOUT", buf)
+        self.assertEqual(buf.getvalue(), b"a\n1\n")
+
+    def test_psycopg3_cursor_without_mogrify_or_copy_expert(self):
+        from app.db import copy_compat
+
+        class Copy:
+            def __enter__(self):
+                return iter([memoryview(b"a\n"), memoryview(b"1\n")])
+
+            def __exit__(self, *exc):
+                return False
+
+        cur = mock.Mock(spec=["copy", "close", "execute"])
+        cur.copy.return_value = Copy()
+        conn = mock.Mock(spec=["cursor", "driver_connection"], cursor=mock.Mock(return_value=cur))
+        with mock.patch("psycopg.ClientCursor") as client_cursor:
+            client_cursor.return_value.mogrify.return_value = "COPY (SELECT 1) TO STDOUT"
+            self.assertEqual(copy_compat.render_sql(conn, "COPY (SELECT %s) TO STDOUT", (1,)), "COPY (SELECT 1) TO STDOUT")
+            client_cursor.assert_called_once_with(conn.driver_connection)
+        buf = io.BytesIO()
+        copy_compat.copy_to(conn, "COPY (SELECT 1) TO STDOUT", buf)
+        self.assertEqual(buf.getvalue(), b"a\n1\n")
+
+
 if __name__ == "__main__":
     unittest.main()
