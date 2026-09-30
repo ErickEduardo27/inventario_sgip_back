@@ -1175,6 +1175,22 @@ def item_photos_records(
     )
 
 
+@router.get("/item-photos/zip-plan")
+def item_photos_zip_plan(
+    establishment_id: int = Query(..., description="Local cuyas fotos se descargarán"),
+    db: Session = Depends(get_db),
+    tenant_id: UUID = Depends(get_tenant_id),
+    _: User = Depends(require_permission("imagenes", "view")),
+):
+    """Fotos del local y su reparto en partes (ZIP de hasta ~15 mil fotos) para ``POST /exports/item_photos_zip``."""
+    from app.modules.exports.item_photos import build_plan
+
+    try:
+        return build_plan(db, tenant_id, establishment_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
 @router.get("/item-cards/records", response_model=PagedRows)
 def item_cards_records(
     db: Session = Depends(get_db), tenant_id: UUID = Depends(get_tenant_id), q: RecordQuery = Depends(_q)

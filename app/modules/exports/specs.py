@@ -13,14 +13,24 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 from uuid import UUID
 
+from app.modules.exports import item_photos as _item_photos
 from app.modules.inventory.descarga_archivos_service import record_query_export_payload
 from app.modules.inventory.schemas import RecordQuery
 
 if TYPE_CHECKING:
     from app.modules.exports.runner import ExportContext
 
-# Resultado de ``generate``: archivo final en disco y nombre de descarga.
-Generated = tuple[Path, str]
+@dataclass(frozen=True)
+class StoredOutput:
+    """Archivo que el generador ya escribió en el almacenamiento (streaming): el runner no lo vuelve a subir."""
+
+    storage_path: str
+    filename: str
+    size: int
+
+
+# Resultado de ``generate``: archivo final en disco y nombre de descarga, o uno ya almacenado.
+Generated = tuple[Path, str] | StoredOutput
 
 #: Alcance de datos que entra en la clave. Hoy todas las exportaciones son de todo el tenant (los datos no
 #: se filtran por agencia del usuario), así que comparten archivo todos los que tienen permiso de exportar.
@@ -40,6 +50,8 @@ class ExportSpec:
     scope: Callable[[Any], str] = lambda _user: TENANT_SCOPE
     #: validación con base de datos antes de encolar (errores inmediatos para el usuario)
     precheck: Callable[[Any, UUID, dict[str, Any]], None] | None = None
+    #: etiqueta del trabajo para la campanita (p. ej. "Fotos · A01 (parte 2 de 6)"); por defecto ``label``
+    describe: Callable[[Any, UUID, dict[str, Any]], str] | None = None
 
 
 def _stamp() -> str:
@@ -320,6 +332,16 @@ SPECS: dict[str, ExportSpec] = {
             _parse_reporte_locales,
             _gen_reporte_locales_zip,
             precheck=_precheck_reporte_locales,
+        ),
+        ExportSpec(
+            "item_photos_zip",
+            "Fotos de bienes",
+            ("imagenes", "view"),
+            ("zip",),
+            _item_photos.parse_filters,
+            _item_photos.generate,
+            precheck=_item_photos.precheck,
+            describe=_item_photos.describe,
         ),
     )
 }

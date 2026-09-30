@@ -200,13 +200,96 @@ class CopyCompatTests(unittest.TestCase):
         cur = mock.Mock(spec=["copy", "close", "execute"])
         cur.copy.return_value = Copy()
         conn = mock.Mock(spec=["cursor", "driver_connection"], cursor=mock.Mock(return_value=cur))
-        with mock.patch("psycopg.ClientCursor") as client_cursor:
-            client_cursor.return_value.mogrify.return_value = "COPY (SELECT 1) TO STDOUT"
+        # psycopg 3 puede no estar instalado en desarrollo (sí en producción): se simula el módulo.
+        client_cursor = mock.Mock()
+        client_cursor.return_value.mogrify.return_value = "COPY (SELECT 1) TO STDOUT"
+        fake_psycopg = SimpleNamespace(ClientCursor=client_cursor)
+        with mock.patch.dict("sys.modules", {"psycopg": fake_psycopg}):
             self.assertEqual(copy_compat.render_sql(conn, "COPY (SELECT %s) TO STDOUT", (1,)), "COPY (SELECT 1) TO STDOUT")
             client_cursor.assert_called_once_with(conn.driver_connection)
         buf = io.BytesIO()
         copy_compat.copy_to(conn, "COPY (SELECT 1) TO STDOUT", buf)
         self.assertEqual(buf.getvalue(), b"a\n1\n")
+
+
+class ItemPhotosZipTests(unittest.TestCase):
+    """ZIP de fotos por local: nombres, partes y generación en streaming."""
+
+    def test_entry_names_follow_slot_nomenclature(self):
+        from app.modules.exports.item_photos import Photo
+
+        base = "https://storage.googleapis.com/b/item-photos/t/x"
+        self.assertEqual(Photo("12345", 1, base + ".jpg").entry_name, "12345-I.jpg")
+        self.assertEqual(Photo("12345", 2, base + ".jpeg?v=1").entry_name, "12345-P.jpeg")
+        self.assertEqual(Photo("12345", 3, base).entry_name, "12345-S.jpg")
+
+    def test_parse_filters_key_ignores_part_labels(self):
+        from app.modules.exports.item_photos import parse_filters
+
+        run, key = parse_filters({"establishment_id": "7", "id_from": 1, "id_to": 50, "part": 2, "parts": 3})
+        self.assertEqual(run["part"], 2)
+        self.assertEqual(key, {"establishment_id": 7, "id_from": 1, "id_to": 50})
+        with self.assertRaises(ValueError):
+            parse_filters({})
+
+    def test_plan_splits_without_breaking_items(self):
+        from app.modules.exports import item_photos
+
+        rows = [SimpleNamespace(id=i, foto1="a", foto2="b" if i % 2 else None, foto3=None) for i in range(1, 11)]
+        db = mock.Mock()
+        db.execute.return_value.all.return_value = rows
+        with mock.patch.object(item_photos, "_establishment", return_value=SimpleNamespace(code="A01", description="SEDE")):
+            plan = item_photos.build_plan(db, uuid.uuid4(), 1, part_max_photos=6)
+        self.assertEqual(plan["photos"], 15)
+        self.assertTrue(all(p["photos"] <= 6 for p in plan["parts"]))
+        self.assertEqual(sum(p["items"] for p in plan["parts"]), 10)
+        self.assertEqual([p["part"] for p in plan["parts"]], list(range(1, len(plan["parts"]) + 1)))
+        # rangos contiguos y sin solaparse
+        for a, b in zip(plan["parts"], plan["parts"][1:]):
+            self.assertLess(a["id_to"], b["id_from"])
+
+    def test_generate_writes_ordered_zip_and_missing_report(self):
+        import tempfile
+        import zipfile
+        from pathlib import Path
+
+        from app.modules.exports import item_photos
+        from app.modules.exports.specs import StoredOutput
+
+        photos = [
+            item_photos.Photo("100", 1, "https://x/100_1.jpg"),
+            item_photos.Photo("100", 2, "https://x/100_2.jpg"),
+            item_photos.Photo("101", 1, "https://x/101_1.jpg"),
+            item_photos.Photo("101", 3, "https://x/roto.jpg"),
+        ]
+
+        def fake_read(url, _tenant):
+            return None if "roto" in url else (url.encode(), "image/jpeg")
+
+        with tempfile.TemporaryDirectory() as tmp, mock.patch("tempfile.gettempdir", return_value=tmp), \
+                mock.patch.object(item_photos, "_load_photos", return_value=(photos, "A01", "SEDE PRINCIPAL")), \
+                mock.patch("app.core.item_photo_storage.read_item_photo_bytes", side_effect=fake_read), \
+                mock.patch("app.core.export_storage.get_settings", return_value=SimpleNamespace(gcs_bucket="")):
+            ctx = SimpleNamespace(job_id=uuid.uuid4(), progress=mock.Mock())
+            out = item_photos.generate(ctx, uuid.uuid4(), {"establishment_id": 1, "part": 2, "parts": 3}, "zip")
+            self.assertIsInstance(out, StoredOutput)
+            self.assertIn("_parte2de3_", out.filename)
+            path = Path(out.storage_path.removeprefix("local:"))
+            self.assertEqual(path.stat().st_size, out.size)
+            with zipfile.ZipFile(path) as zf:
+                names = zf.namelist()
+                self.assertEqual(
+                    names,
+                    [
+                        "A01_SEDE_PRINCIPAL/100-I.jpg",
+                        "A01_SEDE_PRINCIPAL/100-P.jpg",
+                        "A01_SEDE_PRINCIPAL/101-I.jpg",
+                        "A01_SEDE_PRINCIPAL/_fotos_no_disponibles.txt",
+                    ],
+                )
+                self.assertEqual(zf.read("A01_SEDE_PRINCIPAL/100-P.jpg"), b"https://x/100_2.jpg")
+                self.assertIn(b"101-S.jpg", zf.read("A01_SEDE_PRINCIPAL/_fotos_no_disponibles.txt"))
+                self.assertIsNone(zf.testzip())
 
 
 if __name__ == "__main__":

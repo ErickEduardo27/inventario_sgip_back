@@ -11,7 +11,7 @@ from uuid import UUID
 
 from app.db.copy_compat import copy_to, render_sql
 from app.modules.exports import live, service
-from app.modules.exports.specs import get_spec
+from app.modules.exports.specs import StoredOutput, get_spec
 
 logger = logging.getLogger(__name__)
 
@@ -259,16 +259,21 @@ def run_export_job(job_id: str, tenant_id: str, module: str, params: dict[str, A
         with tempfile.TemporaryDirectory(prefix=f"export_{module}_") as tmp:
             ctx = ExportContext(job_uuid, tenant_uuid, Path(tmp))
             with _Heartbeat(ctx):
-                path, filename = spec.generate(ctx, tenant_uuid, params, export_format)
-                size = path.stat().st_size
-                ctx.progress(90, f"Subiendo archivo ({size / 1024 / 1024:.1f} MB)…", force=True)
-                storage_path = upload_export_path(
-                    module=module,
-                    tenant_id=tenant_uuid,
-                    job_id=job_uuid,
-                    filename=filename,
-                    file_path=path,
-                )
+                result = spec.generate(ctx, tenant_uuid, params, export_format)
+                if isinstance(result, StoredOutput):
+                    # Escrito en streaming directo al almacenamiento por el generador.
+                    storage_path, filename, size = result.storage_path, result.filename, result.size
+                else:
+                    path, filename = result
+                    size = path.stat().st_size
+                    ctx.progress(90, f"Subiendo archivo ({size / 1024 / 1024:.1f} MB)…", force=True)
+                    storage_path = upload_export_path(
+                        module=module,
+                        tenant_id=tenant_uuid,
+                        job_id=job_uuid,
+                        filename=filename,
+                        file_path=path,
+                    )
         download_url, expires_at = resolve_download_url(storage_path=storage_path, filename=filename, job_id=job_uuid)
         service.mark_success(
             job_uuid,

@@ -6,6 +6,7 @@ import mimetypes
 import re
 import shutil
 import tempfile
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from uuid import UUID
@@ -93,6 +94,68 @@ def upload_export_path(
     target = Path(tempfile.gettempdir()) / f"export_{module}_{job_id}{suffix}"
     shutil.copyfile(source, target)
     return f"{LOCAL_PREFIX}{target}"
+
+
+class _CountingWriter:
+    """Envoltorio que cuenta los bytes escritos (tamaño final sin releer el objeto)."""
+
+    def __init__(self, raw):
+        self._raw = raw
+        self.bytes_written = 0
+
+    def write(self, data) -> int:
+        n = self._raw.write(data)
+        self.bytes_written += len(data)
+        return n if n is not None else len(data)
+
+    def flush(self) -> None:
+        flush = getattr(self._raw, "flush", None)
+        if flush:
+            flush()
+
+    def tell(self) -> int:
+        return self.bytes_written
+
+
+class ExportStreamTarget:
+    """Resultado de ``open_export_writer``: ruta de almacenamiento y bytes escritos."""
+
+    def __init__(self, fh: _CountingWriter, storage_path: str):
+        self.fh = fh
+        self.storage_path = storage_path
+
+    @property
+    def size(self) -> int:
+        return self.fh.bytes_written
+
+
+@contextmanager
+def open_export_writer(*, module: str, tenant_id: UUID, job_id: UUID, filename: str):
+    """Escribe una exportación directo al almacenamiento, en streaming (sin archivo intermedio).
+
+    En GCS usa una subida reanudable por bloques: la memoria no crece con el tamaño del archivo y la subida
+    ocurre mientras se genera. Si el generador falla, la subida no se finaliza (no queda objeto a medias).
+    """
+    settings = get_settings()
+    if settings.gcs_bucket:
+        object_key = build_export_object_key(module=module, tenant_id=tenant_id, job_id=job_id, filename=filename)
+        blob = _gcs_client().bucket(settings.gcs_bucket).blob(object_key)
+        raw = blob.open("wb", chunk_size=16 * 1024 * 1024, content_type=_content_type(filename))
+        target = ExportStreamTarget(_CountingWriter(raw), object_key)
+        yield target
+        raw.close()  # solo si no hubo error: confirma la subida
+        return
+
+    suffix = Path(filename).suffix or ".bin"
+    path = Path(tempfile.gettempdir()) / f"export_{module}_{job_id}{suffix}"
+    with path.open("wb") as fh:
+        target = ExportStreamTarget(_CountingWriter(fh), f"{LOCAL_PREFIX}{path}")
+        try:
+            yield target
+        except BaseException:
+            fh.close()
+            path.unlink(missing_ok=True)
+            raise
 
 
 def read_export_file(storage_path: str) -> bytes:

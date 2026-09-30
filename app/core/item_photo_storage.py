@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import mimetypes
 import re
+import threading
 import uuid
 from pathlib import Path
 from uuid import UUID
@@ -28,14 +29,21 @@ def build_item_photo_object_key(*, tenant_id: UUID, inv_num: str, slot: int) -> 
     return f"{prefix}/{tenant_id}/{name}"
 
 
+_client_local = threading.local()
+
+
 def _gcs_client():
+    """Un cliente GCS por hilo: crearlo autentica, y hacerlo por cada foto vuelve lentas las descargas masivas."""
+    client = getattr(_client_local, "client", None)
+    if client is not None:
+        return client
     from google.cloud import storage
 
     settings = get_settings()
     creds = settings.google_application_credentials.strip()
-    if creds:
-        return storage.Client.from_service_account_json(creds)
-    return storage.Client()
+    client = storage.Client.from_service_account_json(creds) if creds else storage.Client()
+    _client_local.client = client
+    return client
 
 
 def _gcs_public_url(bucket: str, object_key: str) -> str:

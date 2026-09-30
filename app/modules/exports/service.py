@@ -299,7 +299,7 @@ def request_export(
             "progress": 0,
             "message": "En cola…",
             "module": spec.module,
-            "label": spec.label,
+            "label": spec.describe(db, tenant_id, run_params) if spec.describe else spec.label,
             "format": fmt,
             "tenant_id": tenant_id,
             "started_by_name": _user_name(db, user.id),
