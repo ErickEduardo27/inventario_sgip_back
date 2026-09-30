@@ -1182,11 +1182,32 @@ def item_photos_zip_plan(
     tenant_id: UUID = Depends(get_tenant_id),
     _: User = Depends(require_permission("imagenes", "view")),
 ):
-    """Fotos del local y su reparto en partes (ZIP de hasta ~15 mil fotos) para ``POST /exports/item_photos_zip``."""
-    from app.modules.exports.item_photos import build_plan
+    """Fotos del local y su reparto en partes (ZIP de hasta ~15 mil fotos) para ``POST /exports/item_photos_zip``.
+
+    Si el local ya se generó, devuelve el plan congelado (``frozen``): esos ZIP están guardados y se reutilizan.
+    """
+    from app.modules.exports.item_photos import get_plan
 
     try:
-        return build_plan(db, tenant_id, establishment_id)
+        return get_plan(db, tenant_id, establishment_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/item-photos/zip-plan/reset")
+def item_photos_zip_plan_reset(
+    establishment_id: int = Query(..., description="Local cuyos ZIP de fotos se regenerarán"),
+    db: Session = Depends(get_db),
+    tenant_id: UUID = Depends(get_tenant_id),
+    _: User = Depends(require_permission("imagenes", "edit")),
+):
+    """Solo administradores: descarta los ZIP guardados del local (se borran de GCS) y congela un plan nuevo."""
+    from app.modules.exports.item_photos import LocalBusyError, reset_local
+
+    try:
+        return reset_local(db, tenant_id, establishment_id)
+    except LocalBusyError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 

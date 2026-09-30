@@ -182,6 +182,83 @@ def read_export_file(storage_path: str) -> bytes:
     return blob.download_as_bytes()
 
 
+def export_object_exists(storage_path: str | None) -> bool:
+    """¿Sigue el archivo en el almacenamiento? (p. ej. una regla de ciclo de vida de GCS pudo borrarlo)."""
+    if not storage_path:
+        return False
+    if storage_path.startswith(LOCAL_PREFIX):
+        return Path(storage_path[len(LOCAL_PREFIX) :]).is_file()
+    settings = get_settings()
+    if not settings.gcs_bucket:
+        return False
+    return bool(_gcs_client().bucket(settings.gcs_bucket).blob(storage_path).exists())
+
+
+def delete_export_object(storage_path: str | None) -> None:
+    """Borra un archivo exportado (sin error si ya no existe)."""
+    if not storage_path:
+        return
+    if storage_path.startswith(LOCAL_PREFIX):
+        Path(storage_path[len(LOCAL_PREFIX) :]).unlink(missing_ok=True)
+        return
+    settings = get_settings()
+    if not settings.gcs_bucket:
+        return
+    from google.api_core.exceptions import NotFound
+
+    try:
+        _gcs_client().bucket(settings.gcs_bucket).blob(storage_path).delete()
+    except NotFound:
+        pass
+
+
+def _export_json_location(name: str) -> tuple[str, Path | None]:
+    """Clave GCS (o ruta local en desarrollo) de un JSON auxiliar de exportaciones (p. ej. manifiestos)."""
+    settings = get_settings()
+    prefix = (settings.gcs_export_prefix or "exports").strip("/") or "exports"
+    key = f"{prefix}/{name.strip('/')}"
+    if settings.gcs_bucket:
+        return key, None
+    return key, Path(tempfile.gettempdir()) / "sgip_exports" / name.strip("/")
+
+
+def read_export_json(name: str) -> dict | None:
+    import json
+
+    key, local = _export_json_location(name)
+    if local is not None:
+        return json.loads(local.read_text(encoding="utf-8")) if local.is_file() else None
+    from google.api_core.exceptions import NotFound
+
+    settings = get_settings()
+    try:
+        raw = _gcs_client().bucket(settings.gcs_bucket).blob(key).download_as_bytes()
+    except NotFound:
+        return None
+    return json.loads(raw.decode("utf-8"))
+
+
+def write_export_json(name: str, data: dict) -> None:
+    import json
+
+    payload = json.dumps(data, ensure_ascii=False, indent=1, default=str)
+    key, local = _export_json_location(name)
+    if local is not None:
+        local.parent.mkdir(parents=True, exist_ok=True)
+        local.write_text(payload, encoding="utf-8")
+        return
+    settings = get_settings()
+    _gcs_client().bucket(settings.gcs_bucket).blob(key).upload_from_string(payload, content_type="application/json")
+
+
+def delete_export_json(name: str) -> None:
+    key, local = _export_json_location(name)
+    if local is not None:
+        local.unlink(missing_ok=True)
+        return
+    delete_export_object(key)
+
+
 def generate_signed_download_url(
     object_key: str,
     *,

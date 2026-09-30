@@ -26,7 +26,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.modules.exports import live
-from app.modules.exports.specs import ExportSpec, get_spec, normalize_format
+from app.modules.exports.specs import ExportSpec, NotPlannedError, get_spec, normalize_format
 from app.modules.inventory.models import InvDescargaArchivo
 
 logger = logging.getLogger(__name__)
@@ -172,11 +172,18 @@ def _active_for_key(db: Session, tenant_id: UUID, module: str, request_key: str)
     return active
 
 
-def _recent_success(db: Session, tenant_id: UUID, module: str, request_key: str) -> InvDescargaArchivo | None:
+def _recent_success(
+    db: Session, tenant_id: UUID, module: str, request_key: str, *, immutable: bool = False
+) -> InvDescargaArchivo | None:
+    """Archivo ya generado con la misma clave.
+
+    - Normal: solo si se generó dentro de ``export_reuse_minutes``.
+    - Inmutable: sin límite de antigüedad, pero se verifica que el objeto siga en el almacenamiento.
+    """
     minutes = get_settings().export_reuse_minutes
-    if minutes <= 0:
+    if not immutable and minutes <= 0:
         return None
-    return db.scalar(
+    stmt = (
         select(InvDescargaArchivo)
         .where(
             InvDescargaArchivo.tenant_id == tenant_id,
@@ -184,11 +191,24 @@ def _recent_success(db: Session, tenant_id: UUID, module: str, request_key: str)
             InvDescargaArchivo.request_key == request_key,
             InvDescargaArchivo.state == "success",
             InvDescargaArchivo.gcs_path.is_not(None),
-            InvDescargaArchivo.updated_at > _now() - timedelta(minutes=minutes),
         )
         .order_by(InvDescargaArchivo.updated_at.desc())
-        .limit(1)
     )
+    if not immutable:
+        return db.scalar(stmt.where(InvDescargaArchivo.updated_at > _now() - timedelta(minutes=minutes)).limit(1))
+
+    from app.core.export_storage import export_object_exists
+
+    for row in db.scalars(stmt.limit(5)).all():
+        if export_object_exists(row.gcs_path):
+            return row
+        # El archivo ya no está (p. ej. regla de ciclo de vida del bucket): se permite generarlo otra vez.
+        row.state = "failure"
+        row.message = "El archivo ya no está en el almacenamiento"
+        row.errors = [row.message]
+        db.add(row)
+    db.flush()
+    return None
 
 
 def _user_active_jobs(db: Session, tenant_id: UUID, user_id: UUID, exclude_key: str) -> list[InvDescargaArchivo]:
@@ -212,9 +232,20 @@ def _user_active_jobs(db: Session, tenant_id: UUID, user_id: UUID, exclude_key: 
 # --- API: pedir / consultar ------------------------------------------------------
 
 
-def _prepare(spec: ExportSpec, tenant_id: UUID, user, filters: dict[str, Any], export_format: str | None):
+def _prepare(
+    spec: ExportSpec,
+    tenant_id: UUID,
+    user,
+    filters: dict[str, Any],
+    export_format: str | None,
+    *,
+    db: Session | None = None,
+    create: bool = False,
+):
     fmt = normalize_format(spec, export_format)
     run_params, key_params = spec.parse(filters or {})
+    if spec.resolve is not None and db is not None:
+        run_params, key_params = spec.resolve(db, tenant_id, run_params, key_params, create)
     key = build_request_key(spec.module, tenant_id, key_params, fmt, spec.scope(user))
     return fmt, run_params, key
 
@@ -222,12 +253,16 @@ def _prepare(spec: ExportSpec, tenant_id: UUID, user, filters: dict[str, Any], e
 def lookup_export(db: Session, *, module: str, tenant_id: UUID, user, filters: dict[str, Any], export_format: str | None) -> dict[str, Any]:
     """Sin efectos: ¿hay un trabajo en curso o un archivo reciente para estos filtros?"""
     spec = get_spec(module)
-    _fmt, _run, key = _prepare(spec, tenant_id, user, filters, export_format)
+    try:
+        _fmt, _run, key = _prepare(spec, tenant_id, user, filters, export_format, db=db, create=False)
+    except NotPlannedError:
+        return {"status": "none", "job": None}
     active = _active_for_key(db, tenant_id, spec.module, key)
     db.commit()
     if active is not None:
         return {"status": "active", "job": job_payload(active, user_id=user.id, overlay=live.read_job(active.id))}
-    recent = _recent_success(db, tenant_id, spec.module, key)
+    recent = _recent_success(db, tenant_id, spec.module, key, immutable=spec.immutable)
+    db.commit()
     if recent is not None:
         return {"status": "available", "job": job_payload(recent, user_id=user.id)}
     return {"status": "none", "job": None}
@@ -244,9 +279,9 @@ def request_export(
     force_new: bool = False,
 ) -> dict[str, Any]:
     spec = get_spec(module)
-    fmt, run_params, key = _prepare(spec, tenant_id, user, filters, export_format)
     if spec.precheck is not None:
-        spec.precheck(db, tenant_id, run_params)
+        spec.precheck(db, tenant_id, spec.parse(filters or {})[0])
+    fmt, run_params, key = _prepare(spec, tenant_id, user, filters, export_format, db=db, create=True)
 
     _advisory_lock(db, tenant_id, spec.module, key)
 
@@ -257,8 +292,9 @@ def request_export(
         payload = job_payload(active, user_id=user.id, overlay=live.read_job(active.id))
         return {"status": "joined", "job": payload}
 
-    if not force_new:
-        recent = _recent_success(db, tenant_id, spec.module, key)
+    # Inmutable: un archivo ya guardado nunca se regenera desde un pedido (ni con "generar nueva").
+    if not force_new or spec.immutable:
+        recent = _recent_success(db, tenant_id, spec.module, key, immutable=spec.immutable)
         if recent is not None:
             db.commit()
             return {"status": "available", "job": job_payload(recent, user_id=user.id)}

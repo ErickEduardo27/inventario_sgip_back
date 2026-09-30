@@ -223,14 +223,71 @@ class ItemPhotosZipTests(unittest.TestCase):
         self.assertEqual(Photo("12345", 2, base + ".jpeg?v=1").entry_name, "12345-P.jpeg")
         self.assertEqual(Photo("12345", 3, base).entry_name, "12345-S.jpg")
 
-    def test_parse_filters_key_ignores_part_labels(self):
+    def test_parse_filters_only_takes_local_and_part(self):
         from app.modules.exports.item_photos import parse_filters
 
+        # Los rangos del cliente se ignoran: salen del plan congelado.
         run, key = parse_filters({"establishment_id": "7", "id_from": 1, "id_to": 50, "part": 2, "parts": 3})
-        self.assertEqual(run["part"], 2)
-        self.assertEqual(key, {"establishment_id": 7, "id_from": 1, "id_to": 50})
+        self.assertEqual(run, {"establishment_id": 7, "part": 2})
+        self.assertEqual(key, run)
         with self.assertRaises(ValueError):
             parse_filters({})
+
+    def _manifest(self, version="v1"):
+        return {
+            "version": version,
+            "parts": [
+                {"part": 1, "id_from": 1, "id_to": 50, "items": 10, "photos": 20},
+                {"part": 2, "id_from": 51, "id_to": 90, "items": 8, "photos": 16},
+            ],
+        }
+
+    def test_resolve_uses_frozen_plan_and_versioned_key(self):
+        from app.modules.exports import item_photos
+
+        with mock.patch.object(item_photos, "load_manifest", return_value=self._manifest()):
+            run, key = item_photos.resolve(mock.Mock(), uuid.uuid4(), {"establishment_id": 7, "part": 2}, {}, False)
+        self.assertEqual(run, {"establishment_id": 7, "part": 2, "parts": 2, "id_from": 51, "id_to": 90})
+        self.assertEqual(key, {"establishment_id": 7, "part": 2, "parts": 2, "version": "v1"})
+
+    def test_resolve_without_plan(self):
+        from app.modules.exports import item_photos
+        from app.modules.exports.specs import NotPlannedError
+
+        with mock.patch.object(item_photos, "load_manifest", return_value=None):
+            # consulta sin efectos: nada generado todavía
+            with self.assertRaises(NotPlannedError):
+                item_photos.resolve(mock.Mock(), uuid.uuid4(), {"establishment_id": 7, "part": 1}, {}, False)
+            # primer pedido: congela el plan (con candado para pedidos simultáneos)
+            with mock.patch.object(item_photos, "_lock_local") as lock, \
+                    mock.patch.object(item_photos, "_freeze_plan", return_value=self._manifest("nuevo")) as freeze:
+                run, key = item_photos.resolve(mock.Mock(), uuid.uuid4(), {"establishment_id": 7, "part": 1}, {}, True)
+        lock.assert_called_once()
+        freeze.assert_called_once()
+        self.assertEqual(key["version"], "nuevo")
+        self.assertEqual((run["id_from"], run["id_to"]), (1, 50))
+
+    def test_resolve_rejects_unknown_part(self):
+        from app.modules.exports import item_photos
+
+        with mock.patch.object(item_photos, "load_manifest", return_value=self._manifest()):
+            with self.assertRaises(ValueError):
+                item_photos.resolve(mock.Mock(), uuid.uuid4(), {"establishment_id": 7, "part": 9}, {}, True)
+
+    def test_immutable_reuse_has_no_age_limit_but_checks_storage(self):
+        now = datetime.now(timezone.utc)
+        old = SimpleNamespace(gcs_path="exports/a.zip", updated_at=now - timedelta(days=90), state="success", message="", errors=[])
+        gone = SimpleNamespace(gcs_path="exports/b.zip", updated_at=now, state="success", message="", errors=[])
+        db = mock.Mock()
+        with mock.patch("app.core.export_storage.export_object_exists", side_effect=lambda p: p == "exports/a.zip"):
+            db.scalars.return_value.all.return_value = [gone, old]
+            self.assertIs(service._recent_success(db, uuid.uuid4(), "item_photos_zip", "k", immutable=True), old)
+        self.assertEqual(gone.state, "failure", "el que ya no está en GCS deja de ofrecerse")
+
+    def test_item_photos_zip_is_immutable(self):
+        spec = get_spec("item_photos_zip")
+        self.assertTrue(spec.immutable)
+        self.assertIsNotNone(spec.resolve)
 
     def test_plan_splits_without_breaking_items(self):
         from app.modules.exports import item_photos

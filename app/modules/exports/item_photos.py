@@ -123,18 +123,141 @@ def build_plan(db: Session, tenant_id: UUID, establishment_id: int, part_max_pho
 
 
 def parse_filters(filters: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    """El cliente solo indica local y número de parte: los rangos salen del plan congelado (``resolve``)."""
     try:
         est_id = int(filters.get("establishment_id"))
     except (TypeError, ValueError) as exc:
         raise ValueError("Seleccione un local") from exc
-    run: dict[str, Any] = {"establishment_id": est_id}
-    if filters.get("id_from") is not None and filters.get("id_to") is not None:
-        run["id_from"] = int(filters["id_from"])
-        run["id_to"] = int(filters["id_to"])
-        run["part"] = int(filters.get("part") or 1)
-        run["parts"] = int(filters.get("parts") or 1)
-    key = {k: run[k] for k in ("establishment_id", "id_from", "id_to") if k in run}
-    return run, key
+    try:
+        part = int(filters.get("part") or 1)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Parte inválida") from exc
+    run = {"establishment_id": est_id, "part": part}
+    return run, dict(run)
+
+
+# --- Plan congelado (manifiesto en el almacenamiento) ----------------------------------
+#
+# La primera vez que se genera un ZIP del local se guarda el reparto en partes. Desde entonces las partes
+# (y por tanto sus ZIP guardados) no cambian aunque se agreguen o editen bienes: cualquiera descarga lo
+# guardado y nada se regenera. Solo ``reset_local`` (administrador) crea un plan y ZIP nuevos.
+
+
+def _manifest_name(tenant_id: UUID, establishment_id: int) -> str:
+    return f"{MODULE}/{tenant_id}/manifests/{int(establishment_id)}.json"
+
+
+def load_manifest(tenant_id: UUID, establishment_id: int) -> dict[str, Any] | None:
+    from app.core.export_storage import read_export_json
+
+    return read_export_json(_manifest_name(tenant_id, establishment_id))
+
+
+def _lock_local(db: Session, tenant_id: UUID, establishment_id: int) -> None:
+    import hashlib
+
+    seed = int(hashlib.sha256(f"{tenant_id}:{MODULE}:plan:{establishment_id}".encode()).hexdigest()[:15], 16)
+    db.execute(text("SELECT pg_advisory_xact_lock(:k)"), {"k": seed % (2**31 - 1)})
+
+
+def _freeze_plan(db: Session, tenant_id: UUID, establishment_id: int) -> dict[str, Any]:
+    import uuid as _uuid
+
+    from app.core.export_storage import write_export_json
+
+    plan = build_plan(db, tenant_id, establishment_id)
+    plan["version"] = _uuid.uuid4().hex[:12]
+    plan["frozen_at"] = datetime.now().astimezone().isoformat()
+    write_export_json(_manifest_name(tenant_id, establishment_id), plan)
+    return plan
+
+
+def get_plan(db: Session, tenant_id: UUID, establishment_id: int) -> dict[str, Any]:
+    """Plan congelado si el local ya se generó alguna vez; si no, el reparto que se congelará al generar."""
+    _establishment(db, tenant_id, establishment_id)
+    manifest = load_manifest(tenant_id, establishment_id)
+    if manifest:
+        return {**manifest, "frozen": True}
+    return {**build_plan(db, tenant_id, establishment_id), "frozen": False, "version": None, "frozen_at": None}
+
+
+def resolve(
+    db: Session, tenant_id: UUID, run: dict[str, Any], _key: dict[str, Any], create: bool
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    from app.modules.exports.specs import NotPlannedError
+
+    est_id = int(run["establishment_id"])
+    manifest = load_manifest(tenant_id, est_id)
+    if manifest is None:
+        if not create:
+            raise NotPlannedError("El local aún no tiene ZIP generados")
+        # Dos usuarios pidiendo a la vez el primer ZIP del local: uno congela el plan, el otro lo reutiliza.
+        _lock_local(db, tenant_id, est_id)
+        manifest = load_manifest(tenant_id, est_id) or _freeze_plan(db, tenant_id, est_id)
+    parts = manifest.get("parts") or []
+    part = next((p for p in parts if int(p["part"]) == int(run["part"])), None)
+    if part is None:
+        raise ValueError("Esa parte ya no existe en el plan del local; vuelva a abrir la descarga")
+    full_run = {
+        "establishment_id": est_id,
+        "part": int(part["part"]),
+        "parts": len(parts),
+        "id_from": int(part["id_from"]),
+        "id_to": int(part["id_to"]),
+    }
+    key = {"establishment_id": est_id, "part": full_run["part"], "parts": full_run["parts"], "version": manifest["version"]}
+    return full_run, key
+
+
+class LocalBusyError(Exception):
+    """Hay partes del local generándose: no se puede regenerar hasta que terminen."""
+
+
+def reset_local(db: Session, tenant_id: UUID, establishment_id: int) -> dict[str, Any]:
+    """Regenera el plan del local (solo administradores): borra los ZIP guardados y congela un plan nuevo.
+
+    Los ZIP viejos se eliminan del almacenamiento para no pagar dos veces el espacio.
+    """
+    from app.core.export_storage import delete_export_json, delete_export_object
+    from app.modules.exports import service
+    from app.modules.exports.specs import TENANT_SCOPE
+    from app.modules.inventory.models import InvDescargaArchivo
+
+    _establishment(db, tenant_id, establishment_id)
+    _lock_local(db, tenant_id, establishment_id)
+    manifest = load_manifest(tenant_id, establishment_id)
+    if manifest:
+        parts = manifest.get("parts") or []
+        keys = [
+            service.build_request_key(
+                MODULE,
+                tenant_id,
+                {"establishment_id": establishment_id, "part": int(p["part"]), "parts": len(parts), "version": manifest["version"]},
+                "zip",
+                TENANT_SCOPE,
+            )
+            for p in parts
+        ]
+        rows = db.query(InvDescargaArchivo).filter(
+            InvDescargaArchivo.tenant_id == tenant_id,
+            InvDescargaArchivo.module == MODULE,
+            InvDescargaArchivo.request_key.in_(keys),
+        ).all()
+        busy = [r for r in rows if r.state in service.ACTIVE_STATES and not service.is_stale(r)]
+        if busy:
+            raise LocalBusyError("Hay partes de este local generándose; espere a que terminen para regenerar.")
+        for row in rows:
+            if row.state == "success":
+                delete_export_object(row.gcs_path)
+                row.state = "failure"
+                row.message = "Reemplazado por una versión nueva del ZIP del local"
+                row.errors = [row.message]
+                row.gcs_path = None
+                db.add(row)
+        delete_export_json(_manifest_name(tenant_id, establishment_id))
+    plan = _freeze_plan(db, tenant_id, establishment_id)
+    db.commit()
+    return {**plan, "frozen": True}
 
 
 def precheck(db: Session, tenant_id: UUID, params: dict[str, Any]) -> None:

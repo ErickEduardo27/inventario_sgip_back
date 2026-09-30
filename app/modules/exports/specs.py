@@ -52,6 +52,16 @@ class ExportSpec:
     precheck: Callable[[Any, UUID, dict[str, Any]], None] | None = None
     #: etiqueta del trabajo para la campanita (p. ej. "Fotos · A01 (parte 2 de 6)"); por defecto ``label``
     describe: Callable[[Any, UUID, dict[str, Any]], str] | None = None
+    #: el archivo generado se guarda para siempre y se reutiliza: nunca se regenera desde un pedido normal
+    #: (sin ventana de reutilización ni "generar nueva"). Si el objeto desaparece del almacenamiento, sí.
+    immutable: bool = False
+    #: completa (run, key) con datos persistidos (db, tenant, run, key, crear) → (run, key); p. ej. plan congelado.
+    #: Con crear=False (consultas sin efectos) puede lanzar ``NotPlannedError`` si aún no hay nada generado.
+    resolve: Callable[[Any, UUID, dict[str, Any], dict[str, Any], bool], tuple[dict[str, Any], dict[str, Any]]] | None = None
+
+
+class NotPlannedError(LookupError):
+    """La exportación todavía no tiene plan congelado (nunca se generó)."""
 
 
 def _stamp() -> str:
@@ -342,6 +352,8 @@ SPECS: dict[str, ExportSpec] = {
             _item_photos.generate,
             precheck=_item_photos.precheck,
             describe=_item_photos.describe,
+            immutable=True,
+            resolve=_item_photos.resolve,
         ),
     )
 }
