@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import mimetypes
 import re
 import shutil
@@ -109,9 +110,14 @@ class _CountingWriter:
         return n if n is not None else len(data)
 
     def flush(self) -> None:
+        # zipfile llama a flush() al cerrar. En GCS (subida reanudable) no se puede vaciar sin finalizar:
+        # la subida se confirma con close() en ``open_export_writer``.
         flush = getattr(self._raw, "flush", None)
         if flush:
-            flush()
+            try:
+                flush()
+            except io.UnsupportedOperation:
+                pass
 
     def tell(self) -> int:
         return self.bytes_written
@@ -140,7 +146,13 @@ def open_export_writer(*, module: str, tenant_id: UUID, job_id: UUID, filename: 
     if settings.gcs_bucket:
         object_key = build_export_object_key(module=module, tenant_id=tenant_id, job_id=job_id, filename=filename)
         blob = _gcs_client().bucket(settings.gcs_bucket).blob(object_key)
-        raw = blob.open("wb", chunk_size=16 * 1024 * 1024, content_type=_content_type(filename))
+        raw = blob.open(
+            "wb",
+            chunk_size=16 * 1024 * 1024,
+            content_type=_content_type(filename),
+            # BlobWriter rechaza flush() por defecto; zipfile lo llama al cerrar el ZIP.
+            ignore_flush=True,
+        )
         target = ExportStreamTarget(_CountingWriter(raw), object_key)
         yield target
         raw.close()  # solo si no hubo error: confirma la subida

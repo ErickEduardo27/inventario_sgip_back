@@ -292,5 +292,75 @@ class ItemPhotosZipTests(unittest.TestCase):
                 self.assertIsNone(zf.testzip())
 
 
+class GcsStreamingTests(unittest.TestCase):
+    """El ZIP va en streaming a GCS: el BlobWriter real rechaza flush() salvo con ignore_flush=True."""
+
+    def _fake_blob_writer(self):
+        uploaded = {}
+
+        class FakeBlobWriter:
+            def __init__(self, ignore_flush=False, **_kw):
+                self.ignore_flush = ignore_flush
+                self.buf = io.BytesIO()
+                self.closed = False
+
+            def write(self, data):
+                return self.buf.write(data)
+
+            def flush(self):
+                if not self.ignore_flush:
+                    raise io.UnsupportedOperation("Cannot flush without finalizing upload.")
+
+            def close(self):
+                self.closed = True
+                uploaded["data"] = self.buf.getvalue()
+
+        def open_(mode, **kw):
+            self.assertEqual(mode, "wb")
+            writer = FakeBlobWriter(**kw)
+            uploaded["writer"] = writer
+            return writer
+
+        client = mock.Mock()
+        client.bucket.return_value.blob.return_value.open.side_effect = open_
+        return client, uploaded
+
+    def test_zip_streams_to_gcs_and_finalizes_on_close(self):
+        import zipfile
+
+        from app.core import export_storage
+
+        client, uploaded = self._fake_blob_writer()
+        settings = SimpleNamespace(gcs_bucket="bucket", gcs_export_prefix="exports")
+        with mock.patch.object(export_storage, "get_settings", return_value=settings), \
+                mock.patch.object(export_storage, "_gcs_client", return_value=client):
+            with export_storage.open_export_writer(
+                module="item_photos_zip", tenant_id=uuid.uuid4(), job_id=uuid.uuid4(), filename="fotos.zip"
+            ) as target:
+                with zipfile.ZipFile(target.fh, "w", compression=zipfile.ZIP_STORED, allowZip64=True) as zf:
+                    zf.writestr("A01/1-I.jpg", b"foto")
+                self.assertFalse(uploaded["writer"].closed, "no se finaliza antes de terminar")
+        self.assertTrue(uploaded["writer"].ignore_flush)
+        self.assertTrue(uploaded["writer"].closed)
+        self.assertEqual(target.size, len(uploaded["data"]))
+        with zipfile.ZipFile(io.BytesIO(uploaded["data"])) as zf:
+            self.assertEqual(zf.read("A01/1-I.jpg"), b"foto")
+
+    def test_failed_generation_does_not_finalize_upload(self):
+        from app.core import export_storage
+
+        client, uploaded = self._fake_blob_writer()
+        settings = SimpleNamespace(gcs_bucket="bucket", gcs_export_prefix="exports")
+        with mock.patch.object(export_storage, "get_settings", return_value=settings), \
+                mock.patch.object(export_storage, "_gcs_client", return_value=client):
+            with self.assertRaises(ValueError):
+                with export_storage.open_export_writer(
+                    module="item_photos_zip", tenant_id=uuid.uuid4(), job_id=uuid.uuid4(), filename="fotos.zip"
+                ) as target:
+                    target.fh.write(b"parcial")
+                    raise ValueError("fallo")
+        self.assertFalse(uploaded["writer"].closed, "un ZIP a medias no debe quedar en GCS")
+
+
 if __name__ == "__main__":
     unittest.main()
