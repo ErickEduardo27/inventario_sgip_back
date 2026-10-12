@@ -5,7 +5,7 @@ from __future__ import annotations
 import calendar
 import math
 import uuid as uuid_mod
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import date, datetime, timedelta
 from typing import Any, NamedTuple
 from uuid import UUID
 
@@ -22,7 +22,7 @@ from app.core.inventory_numbers import (
     parse_inventory_number,
     try_parse_inventory_number,
 )
-from app.core.timezone import day_end_pe, day_start_pe, enrich_pe_timestamps, format_datetime_pe
+from app.core.timezone import PERU_TZ, day_end_pe, day_start_pe, enrich_pe_timestamps, format_datetime_pe, to_peru
 from app.modules.inventory import geo_catalog as geo
 from app.modules.inventory import models as m
 from app.modules.iam.models import User
@@ -94,7 +94,8 @@ def inventory_row_dict(obj: Any) -> dict[str, Any]:
     return enrich_pe_timestamps(row_to_dict(obj))
 
 
-_PHOTO_WRITE_EXCLUDE = frozenset({"id", "photo_base64", "photo_clear", "photo_mime"})
+_PHOTO_WRITE_EXCLUDE = frozenset({"id", "photo_base64", "photo_clear", "photo_mime", "interior_photos", "reporte"})
+MAX_ESTABLISHMENT_INTERIOR_PHOTOS = 4
 
 
 def _digits_only(value: object) -> str:
@@ -192,6 +193,36 @@ def _apply_establishment_photo(row: m.InvEstablishment, body: EstablishmentWrite
     row.photo_token = uuid_mod.uuid4()
 
 
+def _apply_establishment_interior_photos(
+    row: m.InvEstablishment, tenant_id: UUID, body: EstablishmentWrite
+) -> list[str]:
+    """Asigna las fotos internas y devuelve las que dejaron de usarse (para borrarlas tras el commit)."""
+    from app.core.public_photo_storage import is_managed_photo
+
+    if body.interior_photos is None:
+        return []
+    new: list[str] = []
+    for raw in body.interior_photos:
+        url = str(raw or "").strip()
+        if not url or url in new:
+            continue
+        if not is_managed_photo("establishment", tenant_id, url):
+            raise ValueError("Foto de ambiente interno no válida. Vuelva a subirla.")
+        new.append(url)
+    if len(new) > MAX_ESTABLISHMENT_INTERIOR_PHOTOS:
+        raise ValueError(f"Máximo {MAX_ESTABLISHMENT_INTERIOR_PHOTOS} fotos de ambientes internos")
+    old = [str(x) for x in (row.interior_photos or [])]
+    row.interior_photos = new or None
+    return [u for u in old if u not in new]
+
+
+def _delete_establishment_photos(tenant_id: UUID, urls: list[str]) -> None:
+    from app.core.public_photo_storage import delete_photo
+
+    for url in urls:
+        delete_photo("establishment", tenant_id, url)
+
+
 # --- Establecimientos (LocalesController store / BienesController store duplicate) ---
 
 
@@ -254,9 +285,13 @@ def upsert_establishment(db: Session, tenant_id: UUID, body: EstablishmentWrite)
         ):
             setattr(row, f, getattr(body, f))
         _apply_establishment_photo(row, body)
+        removed_photos = _apply_establishment_interior_photos(row, tenant_id, body)
+        if body.reporte is not None:
+            row.reporte = body.reporte
         db.add(row)
         db.commit()
         db.refresh(row)
+        _delete_establishment_photos(tenant_id, removed_photos)
         if old_code != row.code:
             from app.modules.inventory.dashboard_establishment_stats_cache import (
                 schedule_dashboard_establishment_stats_refresh,
@@ -265,8 +300,9 @@ def upsert_establishment(db: Session, tenant_id: UUID, body: EstablishmentWrite)
             schedule_dashboard_establishment_stats_refresh(tenant_id, [int(row.id)])
         return row
     data = body.model_dump(exclude=_PHOTO_WRITE_EXCLUDE)
-    row = m.InvEstablishment(tenant_id=tenant_id, **data)
+    row = m.InvEstablishment(tenant_id=tenant_id, reporte=bool(body.reporte), **data)
     _apply_establishment_photo(row, body)
+    _apply_establishment_interior_photos(row, tenant_id, body)
     db.add(row)
     db.commit()
     db.refresh(row)
@@ -307,6 +343,17 @@ def list_establishments(db: Session, tenant_id: UUID, q: RecordQuery, allowed_co
     return out, total
 
 
+def set_establishment_reporte(db: Session, tenant_id: UUID, est_id: int, reporte: bool) -> tuple[bool, str]:
+    """Activa o desactiva el reporte Histórico vs Real del local (todos sus ambientes)."""
+    row = db.get(m.InvEstablishment, est_id)
+    if not row or row.tenant_id != tenant_id:
+        return False, "Local no encontrado"
+    row.reporte = reporte
+    db.add(row)
+    db.commit()
+    return True, "Reporte activado para el local" if reporte else "Reporte desactivado para el local"
+
+
 def delete_establishment(db: Session, tenant_id: UUID, est_id: int) -> tuple[bool, str]:
     row = db.get(m.InvEstablishment, est_id)
     if not row or row.tenant_id != tenant_id:
@@ -323,8 +370,10 @@ def delete_establishment(db: Session, tenant_id: UUID, est_id: int) -> tuple[boo
     )
     if card:
         return False, "No se puede eliminar porque tiene hojas de captura asociadas (vía ambientes)."
+    interior_photos = [str(x) for x in (row.interior_photos or [])]
     db.delete(row)
     db.commit()
+    _delete_establishment_photos(tenant_id, interior_photos)
     return True, "Local eliminado con éxito"
 
 
@@ -407,6 +456,19 @@ def list_persons(db: Session, tenant_id: UUID, q: RecordQuery, allowed_cols: set
                 extra["nombre"].astext.ilike(pattern),
                 extra["apellido_paterno"].astext.ilike(pattern),
                 extra["apellido_materno"].astext.ilike(pattern),
+            )
+        )
+    elif q.column == "codigo_interno" and q.value not in (None, ""):
+        stmt = stmt.where(m.InvPerson.extra["codigo_interno"].astext.ilike(f"%{q.value.strip()}%"))
+    elif col == "name" and q.value not in (None, ""):
+        like = f"%{q.value.strip()}%"
+        extra = m.InvPerson.extra
+        stmt = stmt.where(
+            or_(
+                m.InvPerson.name.ilike(like),
+                extra["nombre"].astext.ilike(like),
+                extra["apellido_paterno"].astext.ilike(like),
+                extra["apellido_materno"].astext.ilike(like),
             )
         )
     elif q.value not in (None, ""):
@@ -576,6 +638,18 @@ def list_cost_centers(db: Session, tenant_id: UUID, q: RecordQuery, allowed_cols
             )
             .distinct()
         )
+    elif q.column == "encargado" and q.value not in (None, ""):
+        enc = m.InvPerson
+        like = f"%{q.value.strip()}%"
+        stmt = stmt.where(
+            exists(
+                select(1).where(
+                    enc.id == m.InvCostCenter.personal_id,
+                    enc.tenant_id == m.InvCostCenter.tenant_id,
+                    or_(enc.number.ilike(like), enc.name.ilike(like)),
+                )
+            )
+        )
     elif q.value not in (None, ""):
         stmt = stmt.where(getattr(m.InvCostCenter, col).ilike(f"%{q.value}%"))
     order_col = q.column_ord or col
@@ -657,7 +731,15 @@ def list_environments(
     if q.establishment_id is not None:
         stmt = stmt.where(m.InvEnvironment.establishment_id == q.establishment_id)
     if q.reporte is not None:
-        stmt = stmt.where(m.InvEnvironment.reporte.is_(q.reporte))
+        # El reporte se activa por local: un ambiente está «en reporte» si su local lo está.
+        en_reporte = exists(
+            select(1).where(
+                m.InvEstablishment.id == m.InvEnvironment.establishment_id,
+                m.InvEstablishment.tenant_id == m.InvEnvironment.tenant_id,
+                m.InvEstablishment.reporte.is_(True),
+            )
+        )
+        stmt = stmt.where(en_reporte if q.reporte else ~en_reporte)
 
     pattern = _search_like(q)
     if pattern is not None:
@@ -682,7 +764,10 @@ def list_environments(
     elif q.column == "local" and q.value not in (None, ""):
         sub = select(m.InvEstablishment.id).where(
             m.InvEstablishment.tenant_id == tenant_id,
-            m.InvEstablishment.description.ilike(f"%{q.value}%"),
+            or_(
+                m.InvEstablishment.description.ilike(f"%{q.value}%"),
+                m.InvEstablishment.code.ilike(f"%{q.value}%"),
+            ),
         )
         stmt = stmt.where(m.InvEnvironment.establishment_id.in_(sub))
     elif q.value not in (None, ""):
@@ -693,8 +778,21 @@ def list_environments(
     rows, total = _paged(db, stmt, q.page, q.per_page)
     if not rows:
         return [], total
-    reporte_env_ids = [int(r.id) for r in rows if r.reporte]
-    reporte_env_codes = [str(r.code or "").strip() for r in rows if r.reporte and str(r.code or "").strip()]
+    est_ids = {r.establishment_id for r in rows if r.establishment_id}
+    locales_en_reporte: set[int] = set()
+    if est_ids:
+        locales_en_reporte = set(
+            db.scalars(
+                select(m.InvEstablishment.id).where(
+                    m.InvEstablishment.tenant_id == tenant_id,
+                    m.InvEstablishment.id.in_(est_ids),
+                    m.InvEstablishment.reporte.is_(True),
+                )
+            ).all()
+        )
+    en_reporte = [r for r in rows if r.establishment_id in locales_en_reporte]
+    reporte_env_ids = [int(r.id) for r in en_reporte]
+    reporte_env_codes = [str(r.code or "").strip() for r in en_reporte if str(r.code or "").strip()]
     bienes_counts: dict[int, int] = {}
     margesi_counts: dict[str, int] = {}
     if reporte_env_ids:
@@ -729,7 +827,9 @@ def list_environments(
     for r in rows:
         d = row_to_dict(r)
         env_code = str(r.code or "").strip()
-        if r.reporte:
+        # «reporte» del ambiente = el de su local (se activa en Locales).
+        d["reporte"] = r.establishment_id in locales_en_reporte
+        if d["reporte"]:
             d["bienes_count"] = bienes_counts.get(int(r.id), 0)
             d["margesi_count"] = margesi_counts.get(env_code, 0)
         else:
@@ -1051,11 +1151,70 @@ def upsert_card(
     return row
 
 
+# Filtro por campo de Hojas de captura (``column`` + ``value``), como en Bienes inventariados.
+CARD_FIELD_FILTERS = frozenset({"local", "ambiente", "centro_costo", "responsable", "nota"})
+
+
+def _card_field_clause(column: str, value: str) -> Any | None:
+    """Condición por campo relacionado de la hoja (EXISTS: no duplica filas ni exige joins)."""
+    pattern = f"%{value.strip()}%"
+    env, est, cc, per = m.InvEnvironment, m.InvEstablishment, m.InvCostCenter, m.InvPerson
+    card = m.InvCard
+    if column == "ambiente":
+        return exists(
+            select(1).where(
+                env.id == card.id_ambiente,
+                env.tenant_id == card.tenant_id,
+                or_(env.code.ilike(pattern), env.description.ilike(pattern)),
+            )
+        )
+    if column == "local":
+        return exists(
+            select(1)
+            .select_from(env)
+            .join(est, (est.id == env.establishment_id) & (est.tenant_id == env.tenant_id))
+            .where(
+                env.id == card.id_ambiente,
+                env.tenant_id == card.tenant_id,
+                or_(est.code.ilike(pattern), est.description.ilike(pattern)),
+            )
+        )
+    if column == "centro_costo":
+        return exists(
+            select(1).where(
+                cc.id == card.id_ccosto,
+                cc.tenant_id == card.tenant_id,
+                or_(cc.code.ilike(pattern), cc.description.ilike(pattern)),
+            )
+        )
+    if column == "responsable":
+        return exists(
+            select(1).where(
+                per.id == card.id_usuario,
+                per.tenant_id == card.tenant_id,
+                or_(per.number.ilike(pattern), per.name.ilike(pattern)),
+            )
+        )
+    if column == "nota":
+        return or_(card.nota_interna.ilike(pattern), card.nota_ficha.ilike(pattern))
+    return None
+
+
 def list_cards(db: Session, tenant_id: UUID, q: RecordQuery, allowed_cols: set[str]) -> tuple[list[dict], int]:
     col = q.column if q.column in allowed_cols else "hoj_num"
     stmt = select(m.InvCard).where(m.InvCard.tenant_id == tenant_id)
     if q.flag_firma is not None:
         stmt = stmt.where(m.InvCard.flag_firma.is_(q.flag_firma))
+    if q.establishment_id is not None:
+        stmt = stmt.where(
+            exists(
+                select(1).where(
+                    m.InvEnvironment.id == m.InvCard.id_ambiente,
+                    m.InvEnvironment.tenant_id == m.InvCard.tenant_id,
+                    m.InvEnvironment.establishment_id == q.establishment_id,
+                )
+            )
+        )
     pattern = _search_like(q)
     if pattern is not None:
         env = m.InvEnvironment
@@ -1076,6 +1235,8 @@ def list_cards(db: Session, tenant_id: UUID, q: RecordQuery, allowed_cols: set[s
             )
             .distinct()
         )
+    elif q.value not in (None, "") and q.column in CARD_FIELD_FILTERS:
+        stmt = stmt.where(_card_field_clause(q.column, q.value))
     elif q.value not in (None, ""):
         if col in _CARD_INT_FILTER_COLS:
             stmt = stmt.where(_where_column_ilike(m.InvCard, col, q.value, numeric_cols=_CARD_INT_FILTER_COLS))
@@ -1163,6 +1324,19 @@ def list_cards(db: Session, tenant_id: UUID, q: RecordQuery, allowed_cols: set[s
         d["firma"] = "Sí" if r.flag_firma else "No"
         out.append(d)
     return out, total
+
+
+def set_card_firma(db: Session, tenant_id: UUID, card_id: int, flag_firma: bool) -> tuple[bool, str]:
+    """Marca o desmarca la firma de la hoja sin pasar por el formulario completo."""
+    row = db.get(m.InvCard, card_id)
+    if not row or row.tenant_id != tenant_id:
+        return False, "Hoja no encontrada"
+    if int(row.state or 1) == 2 and not flag_firma:
+        return False, "La hoja está cerrada: ábrala antes de quitar la firma"
+    row.flag_firma = flag_firma
+    db.add(row)
+    db.commit()
+    return True, "Hoja marcada como firmada" if flag_firma else "Firma de la hoja retirada"
 
 
 def close_card(db: Session, tenant_id: UUID, card_id: int) -> tuple[bool, str]:
@@ -1813,6 +1987,9 @@ def list_item_cards(db: Session, tenant_id: UUID, q: RecordQuery, allowed_cols: 
         order_col = "id"
     stmt = select(m.InvItemCard).where(m.InvItemCard.tenant_id == tenant_id)
 
+    if q.card_id is not None:
+        stmt = stmt.where(m.InvItemCard.id_card == q.card_id)
+
     if q.inv_sit_filter in ("C", "S"):
         stmt = stmt.where(m.InvItemCard.inv_sit == q.inv_sit_filter)
 
@@ -2288,8 +2465,9 @@ SELECT
     ic.id AS itemcard_id,
     ic.id_card AS card_id,
     ic.inv_num,
-    ic.mar_num,
-    ic.inv_num_2,
+    COALESCE(NULLIF(TRIM(ic.mar_num), ''), NULLIF(TRIM(mg.mar_num), '')) AS mar_num,
+    NULLIF(TRIM(ic.inv_num_1), '') AS inv_num_1,
+    NULLIF(TRIM(ic.inv_num_2), '') AS inv_num_2,
     ic.mar_cpat,
     ic.mar_des,
     ic.inv_sit,
@@ -2299,6 +2477,7 @@ SELECT
 FROM itemcards ic
 JOIN cards c ON c.id = ic.id_card AND c.tenant_id = ic.tenant_id
 LEFT JOIN enviroments env ON env.id = c.id_ambiente AND env.tenant_id = c.tenant_id
+LEFT JOIN margesi mg ON mg.id = ic.id_margesi AND mg.tenant_id = ic.tenant_id
 CROSS JOIN LATERAL (
     SELECT slot, photo_url FROM (VALUES
         (1, NULLIF(TRIM(COALESCE(ic.extra->>'mar_foto', ic.extra->>'foto_bien', '')), '')),
@@ -2332,6 +2511,10 @@ def _item_photos_where(q: ItemPhotoQuery) -> tuple[str, dict[str, Any]]:
         clauses.append(
             """(
             CAST(ic.inv_num AS text) ILIKE :search OR
+            ic.mar_num ILIKE :search OR
+            mg.mar_num ILIKE :search OR
+            ic.inv_num_1 ILIKE :search OR
+            ic.inv_num_2 ILIKE :search OR
             ic.mar_cpat ILIKE :search OR
             ic.mar_des ILIKE :search OR
             CAST(c.hoj_num AS text) ILIKE :search
@@ -2339,7 +2522,11 @@ def _item_photos_where(q: ItemPhotoQuery) -> tuple[str, dict[str, Any]]:
         )
         params["search"] = f"%{term}%"
     elif q.value not in (None, ""):
-        col = q.column if q.column in {"inv_num", "mar_cpat", "mar_des", "num_card", "hoj_num"} else "mar_des"
+        col = (
+            q.column
+            if q.column in {"inv_num", "mar_cpat", "mar_des", "num_card", "hoj_num", "mar_num", "inv_num_12"}
+            else "mar_des"
+        )
         if col in ("num_card", "hoj_num"):
             parsed = try_parse_inventory_number(q.value)
             if parsed is not None:
@@ -2356,6 +2543,12 @@ def _item_photos_where(q: ItemPhotoQuery) -> tuple[str, dict[str, Any]]:
             else:
                 clauses.append("CAST(ic.inv_num AS text) ILIKE :col_value")
                 params["col_value"] = f"%{q.value}%"
+        elif col == "mar_num":
+            clauses.append("(ic.mar_num ILIKE :col_value OR mg.mar_num ILIKE :col_value)")
+            params["col_value"] = f"%{q.value}%"
+        elif col == "inv_num_12":
+            clauses.append("(ic.inv_num_1 ILIKE :col_value OR ic.inv_num_2 ILIKE :col_value)")
+            params["col_value"] = f"%{q.value}%"
         else:
             clauses.append(f"ic.{col} ILIKE :col_value")
             params["col_value"] = f"%{q.value}%"
@@ -2401,6 +2594,7 @@ def list_item_photos(db: Session, tenant_id: UUID, q: ItemPhotoQuery) -> tuple[l
                 "card_id": int(row["card_id"]),
                 "inv_num": row["inv_num"],
                 "mar_num": row["mar_num"],
+                "inv_num_1": row["inv_num_1"],
                 "inv_num_2": row["inv_num_2"],
                 "mar_cpat": row["mar_cpat"],
                 "mar_des": row["mar_des"],
@@ -2548,22 +2742,40 @@ def _iter_months(date_from: date, date_to: date) -> list[str]:
 
 
 def _as_start(dt: date) -> datetime:
-    return datetime.combine(dt, time.min, tzinfo=timezone.utc)
+    """Inicio del día en hora de Perú: un bien registrado a las 20:00 (-05) cuenta en su día local."""
+    return day_start_pe(dt)
 
 
 def _as_end(dt: date) -> datetime:
-    return datetime.combine(dt, time.max, tzinfo=timezone.utc)
+    return day_end_pe(dt)
+
+
+def _pe_month_expr(column):
+    """``YYYY-MM`` del timestamp en hora de Perú (no UTC) para agrupar por mes."""
+    return func.to_char(func.date_trunc("month", func.timezone(PERU_TZ.key, column)), "YYYY-MM")
+
+
+def _dashboard_first_record_date(db: Session, tenant_id: UUID) -> date | None:
+    """Fecha del primer bien inventariado del tenant (inicio natural del periodo de inventario)."""
+    first = db.scalar(select(func.min(m.InvItemCard.created_at)).where(m.InvItemCard.tenant_id == tenant_id))
+    if first is None:
+        return None
+    return to_peru(first).date() if isinstance(first, datetime) else first
 
 
 def _resolve_dashboard_range(
+    db: Session,
+    tenant_id: UUID,
     date_from: date | None,
     date_to: date | None,
     month: str | None,
 ) -> tuple[date, date]:
+    """Sin «Desde» el periodo arranca en el primer registro (no el 1 de enero), para que un
+    inventario que cruza el cambio de año (p. ej. dic → mar) se vea completo."""
     if month:
         return _month_bounds(month)
-    today = datetime.now(timezone.utc).date()
-    start = date_from or date(today.year, 1, 1)
+    today = datetime.now(PERU_TZ).date()
+    start = date_from or _dashboard_first_record_date(db, tenant_id) or date(today.year, 1, 1)
     end = date_to or today
     if end < start:
         start, end = end, start
@@ -2790,11 +3002,11 @@ def inventory_dashboard(
     date_to: date | None = None,
     month: str | None = None,
 ) -> dict[str, Any]:
-    range_start, range_end = _resolve_dashboard_range(date_from, date_to, month)
+    range_start, range_end = _resolve_dashboard_range(db, tenant_id, date_from, date_to, month)
     start_dt = _as_start(range_start)
     end_dt = _as_end(range_end)
 
-    bienes_month_expr = func.to_char(func.date_trunc("month", m.InvItemCard.created_at), "YYYY-MM")
+    bienes_month_expr = _pe_month_expr(m.InvItemCard.created_at)
     bienes_stmt = (
         select(bienes_month_expr.label("month"), func.count(m.InvItemCard.id).label("cnt"))
         .select_from(m.InvItemCard)
@@ -2812,7 +3024,7 @@ def inventory_dashboard(
     bienes_rows = db.execute(bienes_stmt).all()
     bienes_by_month = {str(row.month): int(row.cnt) for row in bienes_rows if row.month}
 
-    margesi_month_expr = func.to_char(func.date_trunc("month", m.InvMargesiItem.created_at), "YYYY-MM")
+    margesi_month_expr = _pe_month_expr(m.InvMargesiItem.created_at)
     margesi_stmt = select(
         margesi_month_expr.label("month"),
         func.count(m.InvMargesiItem.id).label("cnt"),
@@ -2870,6 +3082,11 @@ def inventory_dashboard(
             **status_totals,
         },
         "by_month": by_month,
+        "period": {
+            "date_from": range_start,
+            "date_to": range_end,
+            "first_record": _dashboard_first_record_date(db, tenant_id),
+        },
     }
 
 
@@ -2880,9 +3097,12 @@ def inventory_dashboard_establishment_stats(
     page: int = 1,
     per_page: int = 20,
     search: str | None = None,
+    search_column: str | None = None,
     live: bool = False,
 ) -> dict[str, Any]:
-    """Totales por local desde cache materializado (SELECT rápido)."""
+    """Totales por local desde cache materializado (SELECT rápido).
+
+    ``search_column`` (``code`` | ``description``) limita la búsqueda a ese campo."""
     from app.modules.inventory.dashboard_establishment_stats_cache import (
         dashboard_establishment_stats_cache_count,
         # schedule_dashboard_establishment_stats_tenant_refresh,
@@ -2895,6 +3115,7 @@ def inventory_dashboard_establishment_stats(
             page=page,
             per_page=per_page,
             search=search,
+            search_column=search_column,
         )
 
     search_term = (search or "").strip()
@@ -2903,10 +3124,16 @@ def inventory_dashboard_establishment_stats(
     )
     if search_term:
         pattern = f"%{search_term}%"
+        code_col = m.InvDashboardEstablishmentStat.establishment_code
+        des_col = m.InvDashboardEstablishmentStat.establishment_description
         stmt = stmt.where(
-            or_(
-                m.InvDashboardEstablishmentStat.establishment_code.ilike(pattern),
-                m.InvDashboardEstablishmentStat.establishment_description.ilike(pattern),
+            code_col.ilike(pattern)
+            if search_column == "code"
+            else des_col.ilike(pattern)
+            if search_column == "description"
+            else or_(
+                code_col.ilike(pattern),
+                des_col.ilike(pattern),
             ),
         )
     stmt = stmt.order_by(m.InvDashboardEstablishmentStat.establishment_code.asc())
@@ -2937,13 +3164,17 @@ def _inventory_dashboard_establishment_stats_live(
     page: int = 1,
     per_page: int = 20,
     search: str | None = None,
+    search_column: str | None = None,
 ) -> dict[str, Any]:
     """Consulta en vivo (fallback mientras se puebla el cache)."""
     search_term = (search or "").strip()
     bind: dict[str, Any] = {"tenant_id": str(tenant_id)}
     where_extra = ""
     if search_term:
-        where_extra = " AND (e.code ILIKE :search OR COALESCE(e.description, '') ILIKE :search)"
+        where_extra = {
+            "code": " AND e.code ILIKE :search",
+            "description": " AND COALESCE(e.description, '') ILIKE :search",
+        }.get(search_column or "", " AND (e.code ILIKE :search OR COALESCE(e.description, '') ILIKE :search)")
         bind["search"] = f"%{search_term}%"
 
     count_sql = f"""
@@ -3017,7 +3248,7 @@ def _user_registration_stats(
     date_to: date | None = None,
     month: str | None = None,
 ) -> dict[str, Any]:
-    range_start, range_end = _resolve_dashboard_range(date_from, date_to, month)
+    range_start, range_end = _resolve_dashboard_range(db, tenant_id, date_from, date_to, month)
     start_dt = _as_start(range_start)
     end_dt = _as_end(range_end)
 

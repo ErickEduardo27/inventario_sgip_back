@@ -58,6 +58,7 @@ def list_reporte_locales(
     page: int = 1,
     per_page: int = 20,
     search: str | None = None,
+    establishment_ids: list[int] | None = None,
 ) -> dict[str, Any]:
     search_term = (search or "").strip()
     stmt = (
@@ -79,6 +80,8 @@ def list_reporte_locales(
                 m.InvEstablishment.description.ilike(pattern),
             ),
         )
+    if establishment_ids is not None:
+        stmt = stmt.where(m.InvEstablishment.id.in_(establishment_ids))
     stmt = stmt.order_by(m.InvEstablishment.code.asc())
 
     count_stmt = select(func.count()).select_from(stmt.subquery())
@@ -391,7 +394,8 @@ def build_acta_cierre_pdf(
     prov_name = _geo_description(db, InvProvince, est.province_id)
     dist_name = _geo_description(db, InvDistrict, est.district_id)
 
-    conforme = int(stats.get("margesi_conciliado") or 0)
+    # Conforme del acta = bienes inventariados conciliados (no el lado Margesi).
+    conforme = int(stats.get("inventario_conciliado") or 0)
     sobrantes = int(stats.get("inventario_sobrante") or 0)
 
     fecha = body.fecha or (rep.fecha_inventario_real if rep and rep.fecha_inventario_real else None)

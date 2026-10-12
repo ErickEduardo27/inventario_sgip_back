@@ -1,4 +1,4 @@
-"""Fotos servidas por URL pública no adivinable (personas, bienes margesi).
+"""Fotos servidas por URL pública no adivinable (personas, bienes margesi, ambientes de locales).
 
 GCS en producción, disco local en desarrollo. En ambos casos la foto se sirve por
 ``/api/public/{kind}-photo/{tenant_id}/{filename}``; el nombre de archivo es un UUID aleatorio.
@@ -16,7 +16,7 @@ from uuid import UUID
 
 from app.core.config import get_settings
 
-PhotoKind = Literal["person", "margesi"]
+PhotoKind = Literal["person", "margesi", "establishment"]
 
 MAX_PHOTO_BYTES = 5 * 1024 * 1024
 _FILENAME_RE = re.compile(r"^[a-f0-9]{32}\.(jpg|png|webp)$")
@@ -34,14 +34,18 @@ class _KindConfig:
 
     def gcs_prefix(self, kind: PhotoKind) -> str:
         settings = get_settings()
-        raw = settings.gcs_person_photos_prefix if kind == "person" else settings.gcs_margesi_photos_prefix
-        default = "person-photos" if kind == "person" else "margesi-photos"
+        raw, default = {
+            "person": (settings.gcs_person_photos_prefix, "person-photos"),
+            "margesi": (settings.gcs_margesi_photos_prefix, "margesi-photos"),
+            "establishment": (settings.gcs_establishment_photos_prefix, "establishment-photos"),
+        }[kind]
         return (raw or default).strip("/") or default
 
 
 _KINDS: dict[PhotoKind, _KindConfig] = {
     "person": _KindConfig(local_dir="personas", route_segment="person-photo"),
     "margesi": _KindConfig(local_dir="margesi", route_segment="margesi-photo"),
+    "establishment": _KindConfig(local_dir="locales", route_segment="establishment-interior-photo"),
 }
 
 
@@ -119,6 +123,11 @@ def _filename_from_stored(kind: PhotoKind, tenant_id: UUID, stored: str | None) 
         return None
     name = raw.split(marker, 1)[-1].split("?")[0]
     return name if _FILENAME_RE.fullmatch(name) else None
+
+
+def is_managed_photo(kind: PhotoKind, tenant_id: UUID, stored: str | None) -> bool:
+    """True si ``stored`` es una ruta generada por ``upload_photo`` para este kind y tenant."""
+    return _filename_from_stored(kind, tenant_id, stored) is not None
 
 
 def delete_photo(kind: PhotoKind, tenant_id: UUID, stored: str | None) -> None:

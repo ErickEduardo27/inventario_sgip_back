@@ -170,6 +170,10 @@ class Settings(BaseSettings):
         default="margesi-photos",
         description="Prefijo GCS para fotos de bienes margesi (patrimonio).",
     )
+    gcs_establishment_photos_prefix: str = Field(
+        default="establishment-photos",
+        description="Prefijo GCS para fotos de ambientes internos de locales.",
+    )
     gcs_local_fotos_prefix: str = Field(
         default="local-fotos",
         validation_alias=AliasChoices("GCS_LOCAL_FOTOS"),

@@ -80,6 +80,16 @@ class EstablishmentWrite(BaseModel):
     )
     photo_mime: str | None = Field(default=None, max_length=80)
     photo_clear: bool = Field(default=False, description="Si true, elimina la foto guardada del local.")
+    reporte: bool | None = Field(
+        default=None,
+        description="Incluir el local (todos sus ambientes) en el reporte Histórico vs Real. None = no cambiar.",
+    )
+    interior_photos: list[str] | None = Field(
+        default=None,
+        max_length=4,
+        description="Rutas de fotos de ambientes internos (máx. 4, subidas con /establishments/photo). "
+        "None = no cambiar; [] = quitar todas.",
+    )
 
 
 class PersonWrite(BaseModel):
@@ -246,6 +256,10 @@ class RecordQuery(BaseModel):
     column_ord: str | None = None
     ord_tipo: str = "asc"
     flag_firma: bool | None = None
+    card_id: int | None = Field(
+        default=None,
+        description="Bienes de una hoja (deja libres column/value para filtrar por campo)",
+    )
     inv_sit_filter: Literal["C", "S", "N", "F"] | None = Field(
         default=None,
         description="C conciliados; F faltantes (margesi: vacío/guion); N no inventariable; S sobrantes (bienes)",
@@ -279,6 +293,9 @@ class ItemPhotoRow(BaseModel):
     itemcard_id: int
     card_id: int
     inv_num: int | str | None = None
+    mar_num: str | None = None
+    inv_num_1: str | None = None
+    inv_num_2: str | None = None
     mar_cpat: str | None = None
     mar_des: str | None = None
     inv_sit: str | None = None
@@ -308,6 +325,17 @@ class InventoryDashboardKpis(BaseModel):
     inventario_conciliado: int = 0
     inventario_sobrante: int = 0
     inventario_no_conciliable: int = 0
+    margesi_conciliado_en_otro_local: int = 0
+    inventario_conciliado_margesi_otro_local: int = 0
+    inventario_conciliado_sin_margesi: int = 0
+
+
+class InventoryDashboardPeriod(BaseModel):
+    """Periodo efectivo aplicado (con «Desde» vacío arranca en el primer registro)."""
+
+    date_from: date
+    date_to: date
+    first_record: date | None = None
 
 
 class InventoryUserRegistrationStat(BaseModel):
@@ -320,6 +348,7 @@ class InventoryUserRegistrationStat(BaseModel):
 class InventoryDashboardResponse(BaseModel):
     kpis: InventoryDashboardKpis
     by_month: list[InventoryMonthlyCount]
+    period: InventoryDashboardPeriod | None = None
 
 
 class InventoryUserRegistrationsResponse(BaseModel):

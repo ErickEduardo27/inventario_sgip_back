@@ -56,6 +56,7 @@ class UserService:
         page: int = 1,
         per_page: int = 15,
         search: str | None = None,
+        search_column: str | None = None,
     ) -> PagedUserRows:
         page = max(1, page)
         per_page = min(max(1, per_page), 200)
@@ -64,6 +65,7 @@ class UserService:
             page=page,
             per_page=per_page,
             search=search,
+            search_column=search_column,
         )
         return PagedUserRows(
             data=[UserOut.model_validate(u) for u in rows],

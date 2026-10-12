@@ -74,6 +74,10 @@ class InvEstablishment(Base, TenantMixin, TimestampMixin):
     customer_id: Mapped[int | None] = mapped_column(
         BigInteger, ForeignKey("persons.id", ondelete="SET NULL"), nullable=True, index=True
     )
+    # Hasta 4 fotos de ambientes internos (rutas públicas de public_photo_storage, kind "establishment").
+    interior_photos: Mapped[list[str] | None] = mapped_column(JSONB, nullable=True)
+    # Reporte Histórico (Margesí) vs Real (Inventario) de todos sus ambientes (antes, por ambiente).
+    reporte: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
 
     pais: Mapped["InvCountry | None"] = relationship(foreign_keys=[country_id])
     departamento: Mapped["InvDepartment | None"] = relationship(foreign_keys=[department_id])

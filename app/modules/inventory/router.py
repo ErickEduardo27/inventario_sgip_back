@@ -385,6 +385,32 @@ def establishment_delete(
     return OkPayload(success=True, message=msg)
 
 
+@router.patch("/establishments/{row_id}/reporte", response_model=OkPayload)
+def establishment_set_reporte(
+    row_id: int,
+    reporte: bool = Query(..., description="true = incluir el local en el reporte Histórico vs Real"),
+    db: Session = Depends(get_db),
+    tenant_id: UUID = Depends(get_tenant_id),
+    _: User = Depends(require_permission("locales", "edit")),
+):
+    """Activa o desactiva el reporte del local desde la tabla (sin abrir el formulario)."""
+    ok, msg = inv.set_establishment_reporte(db, tenant_id, row_id, reporte)
+    if not ok:
+        raise HTTPException(status_code=404, detail=msg)
+    return OkPayload(success=True, message=msg)
+
+
+@router.post("/establishments/photo", response_model=PersonPhotoUploadResult)
+async def establishment_photo_upload(
+    file: UploadFile = File(...),
+    tenant_id: UUID = Depends(get_tenant_id),
+    _: User = Depends(get_current_user),
+):
+    """Sube una foto de ambiente interno; la ruta se guarda al enviar el local (``interior_photos``)."""
+    url = await _upload_public_photo("establishment", file, tenant_id)
+    return PersonPhotoUploadResult(success=True, message="Foto subida", url=url)
+
+
 @router.post("/establishments", response_model=OkPayload)
 def establishment_save(
     body: EstablishmentWrite,
@@ -858,6 +884,21 @@ def cards_recount(db: Session = Depends(get_db), tenant_id: UUID = Depends(get_t
     return OkPayload(success=True, message="Conteos actualizados")
 
 
+@router.patch("/cards/{card_id}/firma", response_model=OkPayload)
+def card_set_firma(
+    card_id: int,
+    flag_firma: bool = Query(..., description="true = hoja firmada"),
+    db: Session = Depends(get_db),
+    tenant_id: UUID = Depends(get_tenant_id),
+    _: User = Depends(require_permission("hoja_captura", "edit")),
+):
+    """Cambia solo la firma de la hoja (acción rápida desde la tabla)."""
+    ok, msg = inv.set_card_firma(db, tenant_id, card_id, flag_firma)
+    if not ok:
+        raise HTTPException(status_code=400, detail=msg)
+    return OkPayload(success=True, message=msg)
+
+
 @router.patch("/cards/{card_id}/close", response_model=OkPayload)
 def card_close(card_id: int, db: Session = Depends(get_db), tenant_id: UUID = Depends(get_tenant_id), _: User = Depends(get_current_user)):
     ok, msg = inv.close_card(db, tenant_id, card_id)
@@ -1015,12 +1056,14 @@ def hoja_captura_item_record(
     tenant_id: UUID = Depends(get_tenant_id),
     q: RecordQuery = Depends(_q),
 ):
+    # La hoja va en `card_id`; `column` + `value` quedan libres para el filtro por campo del diálogo.
     q = RecordQuery(
         page=q.page,
         per_page=min(q.per_page, 500),
-        column="id_card",
-        value=str(card_id),
+        column=q.column,
+        value=q.value,
         search=q.search,
+        card_id=card_id,
         column_ord=q.column_ord or "id",
         ord_tipo=q.ord_tipo,
     )
@@ -1412,7 +1455,7 @@ def margesi_stats_summary(db: Session = Depends(get_db), tenant_id: UUID = Depen
 
 @router.get("/margesi/records", response_model=PagedRows)
 def margesi_records(db: Session = Depends(get_db), tenant_id: UUID = Depends(get_tenant_id), q: RecordQuery = Depends(_q)):
-    allowed = {"inv_num", "mar_cpat", "mar_des", "inv_sit", "mar_num", "mar_mar", "mar_mod"}
+    allowed = {"inv_num", "mar_cpat", "mar_des", "inv_sit", "mar_num", "mar_mar", "mar_mod", "mar_ser", "amb_cod", "inv_hoj"}
     rows, total = inv.list_margesi(db, tenant_id, q, allowed)
     return PagedRows(data=rows, meta=PagedMeta(**inv.paged_meta(total, q.page, q.per_page)))
 
@@ -1660,6 +1703,9 @@ def inventory_dashboard_establishment_stats(
     page: int = Query(1, ge=1),
     per_page: int = Query(20, ge=1, le=100),
     search: str | None = Query(None, description="Filtrar por código o nombre de local"),
+    column: Literal["code", "description"] | None = Query(
+        None, description="Limita la búsqueda al código o al nombre del local"
+    ),
     live: bool = Query(False, description="Calcular en vivo sin usar cache materializado"),
 ):
     return inv.inventory_dashboard_establishment_stats(
@@ -1668,6 +1714,7 @@ def inventory_dashboard_establishment_stats(
         page=page,
         per_page=per_page,
         search=search,
+        search_column=column,
         live=live,
     )
 
@@ -1693,13 +1740,23 @@ def reporte_locales_records(
     page: int = Query(1, ge=1),
     per_page: int = Query(20, ge=1, le=200),
     search: str | None = Query(None, description="Filtrar por código o nombre de local"),
+    establishment_ids: str | None = Query(
+        None, description="IDs de locales separados por coma (seguimiento de la página del maestro de Locales)"
+    ),
 ):
+    ids: list[int] | None = None
+    if establishment_ids is not None:
+        try:
+            ids = [int(x) for x in establishment_ids.split(",") if x.strip()]
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="establishment_ids inválido") from exc
     return reporte_locales.list_reporte_locales(
         db,
         tenant_id,
         page=page,
         per_page=per_page,
         search=search,
+        establishment_ids=ids,
     )
 
 
@@ -2023,6 +2080,18 @@ def reporte_aptot_export_status(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
+@router.get("/reporte-aptot-departamentos/departments")
+def reporte_aptot_departamentos_departments(
+    db: Session = Depends(get_db),
+    tenant_id: UUID = Depends(get_tenant_id),
+    _: User = Depends(require_permission("reporte_aptot_departamentos", "view")),
+):
+    """Departamentos con locales (y cuántos) para elegir en el reporte APTOT por departamentos."""
+    from app.modules.inventory.reporte_aptot_departamentos import list_departments
+
+    return list_departments(db, tenant_id)
+
+
 @router.get("/reporte-aptot-locales/{establishment_id}/export-meta")
 def reporte_aptot_locales_export_meta(
     establishment_id: int,
@@ -2299,6 +2368,9 @@ def conciliacion_margesi_propuestas(
     local_code: str | None = Query(None),
     sbn: str | None = Query(None),
     search: str | None = Query(None),
+    search_field: Literal["codigo_interno", "inventario", "serie", "modelo"] | None = Query(
+        None, description="Limita `search` a un campo"
+    ),
 ):
     rows, counts = conc_margesi.build_match_proposals(
         db,
@@ -2307,6 +2379,7 @@ def conciliacion_margesi_propuestas(
         sbn=sbn,
         tier=tier,
         search=search,
+        search_field=search_field,
         limit=per_page,
         offset=(page - 1) * per_page,
     )

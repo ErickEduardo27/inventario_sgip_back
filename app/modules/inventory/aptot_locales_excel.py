@@ -63,14 +63,16 @@ def _apply_sit_pat_row_colors(ws, df: pd.DataFrame) -> None:
             ws.cell(row=excel_row, column=col_idx).fill = fill
 
 
-def csv_bytes_to_aptot_locales_xlsx_bytes(csv_payload: bytes, tenant_id: UUID) -> bytes:
-    """Convierte CSV del reporte APTOT local a Excel con colores por SIT_PAT."""
+def csv_bytes_to_aptot_locales_xlsx_bytes(
+    csv_payload: bytes, tenant_id: UUID, *, sheet_title: str = "APTOT local"
+) -> bytes:
+    """Convierte CSV del reporte APTOT (por local o por departamento) a Excel con colores por SIT_PAT."""
     text = csv_payload.decode("utf-8-sig", errors="replace")
     df = pd.read_csv(io.StringIO(text), dtype=str, keep_default_na=False)
 
     wb = Workbook()
     ws = wb.active
-    ws.title = "APTOT local"
+    ws.title = sheet_title[:31]
     header_color = primary_hex_openpyxl(tenant_id)
     _populate_styled_sheet(
         ws,

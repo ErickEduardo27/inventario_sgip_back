@@ -98,6 +98,27 @@ def _parse_aptot_locales(filters: dict[str, Any]) -> tuple[dict[str, Any], dict[
     return {"establishment_id": est_id}, {"establishment_id": est_id}
 
 
+def _parse_aptot_departamentos(filters: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    department = (str(filters.get("department_id") or "")).strip()
+    if not department:
+        raise ValueError("Seleccione un departamento")
+    return {"department_id": department}, {"department_id": department}
+
+
+def _precheck_aptot_departamentos(db, tenant_id: UUID, params: dict[str, Any]) -> None:
+    from app.modules.inventory.reporte_aptot_departamentos import department_summary
+
+    if department_summary(db, tenant_id, str(params["department_id"])) is None:
+        raise ValueError("El departamento no tiene locales registrados")
+
+
+def _describe_aptot_departamentos(db, tenant_id: UUID, params: dict[str, Any]) -> str:
+    from app.modules.inventory.reporte_aptot_departamentos import department_summary
+
+    info = department_summary(db, tenant_id, str(params["department_id"]))
+    return f"APTOT · {info['description']}" if info else "APTOT por departamento"
+
+
 def _parse_reporte_locales(filters: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
     ids = sorted({int(x) for x in (filters.get("establishment_ids") or []) if x is not None and str(x).strip()})
     department = (str(filters.get("department_id") or "")).strip() or None
@@ -268,6 +289,35 @@ def _gen_aptot_locales(ctx: "ExportContext", tenant_id: UUID, params: dict[str, 
     return ctx.copy_csv(inner_sql, sql_params), filename
 
 
+def _gen_aptot_departamentos(ctx: "ExportContext", tenant_id: UUID, params: dict[str, Any], fmt: str) -> Generated:
+    from app.db.session import SessionLocal
+    from app.modules.inventory.export_queries import build_reporte_aptot_departamentos_export_query
+    from app.modules.inventory.reporte_aptot_departamentos import department_summary, slug
+
+    department_id = str(params["department_id"])
+    with SessionLocal() as db:
+        info = department_summary(db, tenant_id, department_id)
+    if info is None:
+        raise ValueError("El departamento no tiene locales registrados")
+    inner_sql, sql_params, _base = build_reporte_aptot_departamentos_export_query(tenant_id, department_id)
+    ext = "xlsx" if fmt == "xlsx" else "csv"
+    filename = f"reporte_aptot_departamento_{department_id}_{slug(info['description'])}_{_stamp()}.{ext}"
+    if fmt == "xlsx":
+        from app.modules.inventory.aptot_locales_excel import csv_bytes_to_aptot_locales_xlsx_bytes
+
+        csv_path = ctx.copy_csv(inner_sql, sql_params, bom=False)
+        return (
+            ctx.to_xlsx(
+                csv_path,
+                lambda payload: csv_bytes_to_aptot_locales_xlsx_bytes(
+                    payload, tenant_id, sheet_title="APTOT departamento"
+                ),
+            ),
+            filename,
+        )
+    return ctx.copy_csv(inner_sql, sql_params), filename
+
+
 def _gen_reporte_locales_zip(ctx: "ExportContext", tenant_id: UUID, params: dict[str, Any], _fmt: str) -> Generated:
     import zipfile
 
@@ -333,6 +383,16 @@ SPECS: dict[str, ExportSpec] = {
             ("csv", "xlsx"),
             _parse_aptot_locales,
             _gen_aptot_locales,
+        ),
+        ExportSpec(
+            "reporte_aptot_departamentos",
+            "APTOT por departamento",
+            ("reporte_aptot_departamentos", "export"),
+            ("csv", "xlsx"),
+            _parse_aptot_departamentos,
+            _gen_aptot_departamentos,
+            precheck=_precheck_aptot_departamentos,
+            describe=_describe_aptot_departamentos,
         ),
         ExportSpec(
             "reporte_locales",

@@ -29,12 +29,16 @@ class UserRepository:
         page: int,
         per_page: int,
         search: str | None = None,
+        search_column: str | None = None,
     ) -> tuple[list[User], int]:
         filters = [User.tenant_id == tenant_id, User.is_deleted.is_(False)]
         pattern = _user_search_pattern(search)
         if pattern:
+            by_column = {"full_name": User.full_name, "email": User.email, "status": User.status}
             filters.append(
-                or_(
+                by_column[search_column].ilike(pattern)
+                if search_column in by_column
+                else or_(
                     User.full_name.ilike(pattern),
                     User.email.ilike(pattern),
                     User.status.ilike(pattern),

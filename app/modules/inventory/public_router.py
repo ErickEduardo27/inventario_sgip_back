@@ -53,6 +53,11 @@ def serve_person_photo(tenant_id: UUID, filename: str) -> Response:
     return _serve_photo(read_photo("person", tenant_id, filename))
 
 
+@router.get("/establishment-interior-photo/{tenant_id}/{filename}")
+def serve_establishment_interior_photo(tenant_id: UUID, filename: str) -> Response:
+    return _serve_photo(read_photo("establishment", tenant_id, filename))
+
+
 @router.get("/margesi-photo/{tenant_id}/{filename}")
 def serve_margesi_photo(tenant_id: UUID, filename: str) -> Response:
     return _serve_photo(read_photo("margesi", tenant_id, filename))

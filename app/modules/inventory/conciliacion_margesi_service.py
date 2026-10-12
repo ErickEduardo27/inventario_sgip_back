@@ -459,6 +459,7 @@ def build_match_proposals(
     sbn: str | None = None,
     tier: str | None = None,
     search: str | None = None,
+    search_field: str | None = None,
     limit: int = 100,
     offset: int = 0,
 ) -> tuple[list[dict[str, Any]], dict[str, int]]:
@@ -566,18 +567,24 @@ def build_match_proposals(
         filtered = []
         for item in scored:
             _, _, _, _, _, marg, bien = item
-            blob = " ".join(
-                [
-                    str(_margesi_codigo_interno(marg) or ""),
-                    str(marg.mar_cpat or ""),
-                    str(marg.mar_ser or ""),
-                    str(format_inv_num(bien.inv_num) if bien.inv_num is not None else ""),
-                    str(bien.mar_cpat or ""),
-                    str(_bien_field(bien, "mar_ser")),
-                    str(marg.mar_mod or ""),
-                    str(_bien_field(bien, "mar_mod")),
-                ]
-            ).lower()
+            # «Buscar en [campo]»: sin campo, busca en todos (comportamiento anterior).
+            by_field = {
+                "codigo_interno": [_margesi_codigo_interno(marg)],
+                "inventario": [format_inv_num(bien.inv_num) if bien.inv_num is not None else ""],
+                "serie": [marg.mar_ser, _bien_field(bien, "mar_ser")],
+                "modelo": [marg.mar_mod, _bien_field(bien, "mar_mod")],
+            }
+            values = by_field.get(search_field or "") or [
+                _margesi_codigo_interno(marg),
+                marg.mar_cpat,
+                marg.mar_ser,
+                format_inv_num(bien.inv_num) if bien.inv_num is not None else "",
+                bien.mar_cpat,
+                _bien_field(bien, "mar_ser"),
+                marg.mar_mod,
+                _bien_field(bien, "mar_mod"),
+            ]
+            blob = " ".join(str(v or "") for v in values).lower()
             if search_q in blob:
                 filtered.append(item)
         scored = filtered

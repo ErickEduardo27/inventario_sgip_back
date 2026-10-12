@@ -500,6 +500,48 @@ UNION ALL
 {_MARGESI_LIVE_EXPORT_SELECT}
 """
 
+# --- APTOT por departamento: misma consulta que por local, comparando el departamento del local ---
+# Bienes inventariados físicamente en el departamento, o cuyo Margesi apunta a un local del departamento
+# (``CR`` si aparecieron en otro departamento), más los faltantes del Margesi del departamento.
+_DEPARTAMENTO_FILTER_ITEMCARD = """
+  AND (
+    ee.department_id = %s
+    OR (ee.department_id IS DISTINCT FROM %s AND est.department_id = %s)
+  )
+"""
+
+_DEPARTAMENTO_FILTER_MARGESI = """
+  AND est.department_id = %s
+  AND (
+    m.inv_sit IS NULL
+    OR UPPER(TRIM(COALESCE(m.inv_sit, ''))) = 'N'
+  )
+"""
+
+
+def _por_departamento(sql: str, replacements: list[tuple[str, str]]) -> str:
+    """Sustituye los filtros de local por los de departamento (falla si la plantilla cambió)."""
+    for old, new in replacements:
+        if sql.count(old) != 1:
+            raise RuntimeError("La plantilla APTOT por local cambió: revise la variante por departamento")
+        sql = sql.replace(old, new)
+    return sql
+
+
+REPORTE_APTOT_DEPARTAMENTOS_LIVE_UNION_SQL = f"""
+{_por_departamento(
+    _ITEMCARD_LIVE_EXPORT_SELECT,
+    [
+        ("WHEN ee.id IS DISTINCT FROM %s THEN 'CR'", "WHEN ee.department_id IS DISTINCT FROM %s THEN 'CR'"),
+        (_LOCAL_FILTER_ITEMCARD, _DEPARTAMENTO_FILTER_ITEMCARD),
+    ],
+)}
+
+UNION ALL
+
+{_por_departamento(_MARGESI_LIVE_EXPORT_SELECT, [(_LOCAL_FILTER_MARGESI, _DEPARTAMENTO_FILTER_MARGESI)])}
+"""
+
 REPORTE_APTOT_INSERT_SQL = f"""
 INSERT INTO reporte_aptot_cache (
     tenant_id,

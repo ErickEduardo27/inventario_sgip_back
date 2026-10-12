@@ -1,3 +1,4 @@
+from typing import Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -47,8 +48,13 @@ def list_users_paged(
     page: int = Query(1, ge=1),
     per_page: int = Query(15, ge=1, le=200),
     search: str | None = Query(None),
+    column: Literal["full_name", "email", "status"] | None = Query(
+        None, description="Limita la búsqueda a nombre, correo o estado"
+    ),
 ):
-    return UserService(db).list_users_paged(tenant_id, page=page, per_page=per_page, search=search)
+    return UserService(db).list_users_paged(
+        tenant_id, page=page, per_page=per_page, search=search, search_column=column
+    )
 
 
 @router.get("/users/{user_id}", response_model=UserOut)

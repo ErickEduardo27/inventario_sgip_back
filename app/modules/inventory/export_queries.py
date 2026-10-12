@@ -549,10 +549,57 @@ def build_reporte_aptot_locales_export_query(
     return sql, params, "reporte_aptot_locales_export"
 
 
+def build_reporte_aptot_departamentos_export_query(
+    tenant_id: UUID,
+    department_id: str,
+) -> tuple[str, tuple[Any, ...], str]:
+    """CSV/Excel APTOT de todos los locales de un departamento, generado en vivo (sin cache global)."""
+    from app.modules.inventory.reporte_aptot_locales_export_columns import (
+        REPORTE_APTOT_LOCALES_EXPORT_COLUMNS_SQL,
+    )
+    from app.modules.inventory.reporte_aptot_sql import REPORTE_APTOT_DEPARTAMENTOS_LIVE_UNION_SQL
+
+    tid = str(tenant_id)
+    dep = str(department_id)
+    sql = f"""
+        SELECT
+{REPORTE_APTOT_LOCALES_EXPORT_COLUMNS_SQL}
+        FROM (
+{REPORTE_APTOT_DEPARTAMENTOS_LIVE_UNION_SQL}
+        ) aptot
+        ORDER BY aptot.local_code NULLS LAST, aptot.source_kind, aptot.source_ref_id
+    """
+    params: tuple[Any, ...] = (dep, tid, dep, dep, dep, tid, dep)
+    return sql, params, "reporte_aptot_departamentos_export"
+
+
 def build_cards_export_query(tenant_id: UUID, q: RecordQuery) -> tuple[str, tuple[Any, ...], str]:
     where, params = _build_cards_list_where(tenant_id, q)
     sql = f"{_CARDS_EXPORT_SELECT} WHERE {' AND '.join(where)} ORDER BY c.hoj_num, c.id"
     return sql, tuple(params), "hoja_captura_export"
+
+
+# Mismos filtros por campo que ``service.list_cards`` (EXISTS: válidos con cualquier SELECT sobre ``cards c``).
+_CARD_FIELD_SQL = {
+    "local": (
+        "EXISTS (SELECT 1 FROM enviroments fe JOIN establishments fest ON fest.id = fe.establishment_id "
+        "AND fest.tenant_id = fe.tenant_id WHERE fe.id = c.id_ambiente AND fe.tenant_id = c.tenant_id "
+        "AND (fest.code ILIKE %s OR fest.description ILIKE %s))"
+    ),
+    "ambiente": (
+        "EXISTS (SELECT 1 FROM enviroments fe WHERE fe.id = c.id_ambiente AND fe.tenant_id = c.tenant_id "
+        "AND (fe.code ILIKE %s OR fe.description ILIKE %s))"
+    ),
+    "centro_costo": (
+        "EXISTS (SELECT 1 FROM cost_center fcc WHERE fcc.id = c.id_ccosto AND fcc.tenant_id = c.tenant_id "
+        "AND (fcc.code ILIKE %s OR fcc.description ILIKE %s))"
+    ),
+    "responsable": (
+        "EXISTS (SELECT 1 FROM persons fp WHERE fp.id = c.id_usuario AND fp.tenant_id = c.tenant_id "
+        "AND (fp.number ILIKE %s OR fp.name ILIKE %s))"
+    ),
+    "nota": "(c.nota_interna ILIKE %s OR c.nota_ficha ILIKE %s)",
+}
 
 
 def _build_cards_list_where(tenant_id: UUID, q: RecordQuery) -> tuple[list[str], list[Any]]:
@@ -562,6 +609,13 @@ def _build_cards_list_where(tenant_id: UUID, q: RecordQuery) -> tuple[list[str],
     if q.flag_firma is not None:
         where.append("c.flag_firma = %s")
         params.append(q.flag_firma)
+
+    if q.establishment_id is not None:
+        where.append(
+            "EXISTS (SELECT 1 FROM enviroments fe WHERE fe.id = c.id_ambiente AND fe.tenant_id = c.tenant_id "
+            "AND fe.establishment_id = %s)"
+        )
+        params.append(q.establishment_id)
 
     term = (q.search or "").strip()
     if term:
@@ -578,6 +632,11 @@ def _build_cards_list_where(tenant_id: UUID, q: RecordQuery) -> tuple[list[str],
             )"""
         )
         params.extend([pattern] * 7)
+    elif q.value not in (None, "") and q.column in _CARD_FIELD_SQL:
+        pattern = f"%{q.value.strip()}%"
+        clause = _CARD_FIELD_SQL[q.column]
+        where.append(clause)
+        params.extend([pattern] * clause.count("%s"))
     elif q.value not in (None, ""):
         allowed = {"hoj_num", "state", "nota_interna"}
         col = q.column if q.column in allowed else "hoj_num"
@@ -642,7 +701,7 @@ def build_margesi_export_query(
     export_layout = layout or q.export_layout or "full"
     where = ["m.tenant_id = %s::uuid"]
     params: list[Any] = [str(tenant_id)]
-    allowed = {"inv_num", "mar_cpat", "mar_des", "inv_sit", "mar_num", "mar_mar", "mar_mod", "inv_hoj"}
+    allowed = {"inv_num", "mar_cpat", "mar_des", "inv_sit", "mar_num", "mar_mar", "mar_mod", "inv_hoj", "mar_ser", "amb_cod"}
 
     if q.inv_sit_filter == "C":
         where.append("m.inv_sit = %s")
