@@ -136,6 +136,22 @@ def _sbn_prefix(value: str | None) -> str:
     return digits[:8] if len(digits) >= 8 else digits
 
 
+# SBN del bien antes de la conciliación SBN (que lo reemplaza por el código de 12 dígitos).
+_SBN_ORIGINAL_KEY = "mar_cpat_pre_sbn"
+
+
+def _restore_bien_sbn(bien: m.InvItemCard, extra: dict[str, Any], *, legacy_prefix: bool) -> None:
+    """Devuelve ``mar_cpat`` al valor previo a la conciliación SBN.
+
+    Conciliaciones SBN anteriores a guardar el original no lo tienen: con ``legacy_prefix``
+    se quitan los 4 dígitos agregados (queda el prefijo de 8).
+    """
+    if _SBN_ORIGINAL_KEY in extra:
+        bien.mar_cpat = extra.pop(_SBN_ORIGINAL_KEY)
+    elif legacy_prefix:
+        bien.mar_cpat = _sbn_prefix(bien.mar_cpat) or None
+
+
 def _apply_situacion_margesi(stmt, situacion: str | None):
     if not situacion or situacion == "todos":
         return stmt
@@ -643,6 +659,7 @@ def conciliar_pair_sbn(
         extra = dict(bien.extra or {})
         if mar_num:
             extra["mar_npri"] = mar_num
+        extra.setdefault(_SBN_ORIGINAL_KEY, bien.mar_cpat)
 
         marg.inv_num = format_inv_num(bien.inv_num)
         marg.inv_sit = "C"
@@ -698,6 +715,7 @@ def desconciliar_item(db: Session, tenant_id: UUID, item_id: int) -> tuple[bool,
 
         extra = dict(bien.extra or {})
         extra.pop("mar_npri", None)
+        _restore_bien_sbn(bien, extra, legacy_prefix=False)
         bien.id_margesi = None
         bien.mar_num = None
         bien.inv_sit = "S"
@@ -750,10 +768,10 @@ def desconciliar_pair_sbn(
 
         extra = dict(bien.extra or {})
         extra.pop("mar_npri", None)
+        _restore_bien_sbn(bien, extra, legacy_prefix=True)
         bien.id_margesi = None
-        bien.mar_cpat = None
         bien.mar_num = None
-        bien.inv_sit = None
+        bien.inv_sit = "S"
         bien.inv_con = None
         bien.extra = extra or None
 
@@ -1260,7 +1278,7 @@ def import_desconciliar_match_rows(
             )
             continue
 
-        ok, msg = desconciliar_pair_sbn(db, tenant_id, int(bien.id), int(marg.id))
+        ok, msg = desconciliar_item(db, tenant_id, int(bien.id))
         entry = _import_row_entry(
             row_dump,
             margesi_id=int(marg.id),

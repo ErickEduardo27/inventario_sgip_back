@@ -163,7 +163,7 @@ def _master(module: str, sheet_title: str):
             from app.modules.inventory.excel_styled_export import csv_bytes_to_styled_xlsx_bytes
             from app.modules.tenants.theme import primary_hex_openpyxl
 
-            csv_path = ctx.copy_csv(inner_sql, (str(tenant_id),), bom=False)
+            csv_path = ctx.copy_csv(inner_sql, (str(tenant_id),), bom=False, single_line=False)
             path = ctx.to_xlsx(
                 csv_path,
                 lambda payload: csv_bytes_to_styled_xlsx_bytes(
@@ -186,7 +186,7 @@ def _gen_margesi(ctx: "ExportContext", tenant_id: UUID, params: dict[str, Any], 
     q = RecordQuery.model_validate(params)
     inner_sql, sql_params, filename_base = build_margesi_export_query(tenant_id, q)
     if fmt == "xlsx":
-        csv_path = ctx.copy_csv(inner_sql, sql_params, bom=False)
+        csv_path = ctx.copy_csv(inner_sql, sql_params, bom=False, single_line=False)
         return ctx.to_xlsx(csv_path, csv_bytes_to_xlsx_bytes), f"{filename_base}_{_stamp()}.xlsx"
     return ctx.copy_csv(inner_sql, sql_params), f"{filename_base}_{_stamp()}.csv"
 
@@ -202,7 +202,7 @@ def _gen_item_cards(ctx: "ExportContext", tenant_id: UUID, params: dict[str, Any
     q = RecordQuery.model_validate(params)
     inner_sql, sql_params, filename_base = build_item_cards_export_query(tenant_id, q)
     if fmt == "xlsx":
-        csv_path = ctx.copy_csv(inner_sql, sql_params, bom=False)
+        csv_path = ctx.copy_csv(inner_sql, sql_params, bom=False, single_line=False)
         path = ctx.to_xlsx(
             csv_path,
             lambda payload: csv_bytes_to_styled_xlsx_bytes(
@@ -226,7 +226,7 @@ def _gen_hoja_captura(ctx: "ExportContext", tenant_id: UUID, params: dict[str, A
 
     q = RecordQuery.model_validate(params)
     inner_sql, sql_params, filename_base = build_cards_export_query(tenant_id, q)
-    csv_path = ctx.copy_csv(inner_sql, sql_params, bom=False)
+    csv_path = ctx.copy_csv(inner_sql, sql_params, bom=False, single_line=False)
     path = ctx.to_xlsx(
         csv_path,
         lambda payload: csv_bytes_to_styled_xlsx_bytes(
@@ -252,7 +252,7 @@ def _gen_reporte_aptot(ctx: "ExportContext", tenant_id: UUID, _params: dict[str,
         )
         from app.modules.tenants.theme import primary_hex_openpyxl
 
-        csv_path = ctx.copy_csv(inner_sql, (str(tenant_id),), bom=False, header_spaces=True)
+        csv_path = ctx.copy_csv(inner_sql, (str(tenant_id),), bom=False, header_spaces=True, single_line=False)
         path = ctx.to_xlsx(
             csv_path,
             lambda payload: csv_bytes_to_styled_xlsx_bytes(
@@ -284,7 +284,7 @@ def _gen_aptot_locales(ctx: "ExportContext", tenant_id: UUID, params: dict[str, 
     if fmt == "xlsx":
         from app.modules.inventory.aptot_locales_excel import csv_bytes_to_aptot_locales_xlsx_bytes
 
-        csv_path = ctx.copy_csv(inner_sql, sql_params, bom=False)
+        csv_path = ctx.copy_csv(inner_sql, sql_params, bom=False, single_line=False)
         return ctx.to_xlsx(csv_path, lambda payload: csv_bytes_to_aptot_locales_xlsx_bytes(payload, tenant_id)), filename
     return ctx.copy_csv(inner_sql, sql_params), filename
 
@@ -305,7 +305,7 @@ def _gen_aptot_departamentos(ctx: "ExportContext", tenant_id: UUID, params: dict
     if fmt == "xlsx":
         from app.modules.inventory.aptot_locales_excel import csv_bytes_to_aptot_locales_xlsx_bytes
 
-        csv_path = ctx.copy_csv(inner_sql, sql_params, bom=False)
+        csv_path = ctx.copy_csv(inner_sql, sql_params, bom=False, single_line=False)
         return (
             ctx.to_xlsx(
                 csv_path,

@@ -88,9 +88,14 @@ class ExportContext:
         name: str = "data.csv",
         bom: bool = True,
         header_spaces: bool = False,
+        single_line: bool = True,
         span: tuple[int, int] = (5, 80),
     ) -> Path:
-        """``COPY (consulta) TO STDOUT`` escrito directo a un archivo: la memoria no crece con las filas."""
+        """``COPY (consulta) TO STDOUT`` escrito directo a un archivo: la memoria no crece con las filas.
+
+        ``single_line``: los saltos de línea dentro de un campo (observaciones…) se cambian por espacios,
+        porque muchos lectores de CSV los toman como fin de registro. El CSV intermedio para Excel los conserva.
+        """
         from app.db.session import engine
 
         self.progress(span[0], "Preparando datos…", force=True)
@@ -106,7 +111,9 @@ class ExportContext:
             with path.open("wb") as fh:
                 if bom:
                     fh.write(BOM)
-                writer = _ProgressWriter(fh, self, total=total, span=span, header_spaces=header_spaces)
+                writer = _ProgressWriter(
+                    fh, self, total=total, span=span, header_spaces=header_spaces, single_line=single_line
+                )
                 copy_to(conn, copy_sql, writer)
                 writer.flush()
             self.progress(span[1], f"{_fmt_int(writer.rows)} filas generadas", rows_done=writer.rows, rows_total=total)
@@ -166,13 +173,24 @@ class _Heartbeat:
 class _ProgressWriter:
     """Destino del COPY: escribe en disco y reporta avance cada ``PROGRESS_EVERY_ROWS`` filas."""
 
-    def __init__(self, fh, ctx: ExportContext, *, total: int | None, span: tuple[int, int], header_spaces: bool):
+    def __init__(
+        self,
+        fh,
+        ctx: ExportContext,
+        *,
+        total: int | None,
+        span: tuple[int, int],
+        header_spaces: bool,
+        single_line: bool = False,
+    ):
         self._fh = fh
         self._ctx = ctx
         self._total = total
         self._span = span
         self._header_pending = header_spaces
         self._header_buf = b""
+        self._single_line = single_line
+        self._in_quotes = False
         self._newlines = 0
         self._next_report = PROGRESS_EVERY_ROWS
 
@@ -180,6 +198,24 @@ class _ProgressWriter:
     def rows(self) -> int:
         # La primera línea es la cabecera. Aproximado si un campo trae saltos de línea (solo para el avance).
         return max(self._newlines - 1, 0)
+
+    def _flatten(self, chunk: bytes) -> bytes:
+        """Cambia por espacios los saltos de línea dentro de campos entre comillas.
+
+        En CSV cada ``"`` alterna dentro/fuera de comillas (``""`` escapada alterna dos veces), así que
+        partir por ``"`` deja tramos alternos; el estado se arrastra entre bloques del COPY.
+        """
+        if not self._in_quotes and b'"' not in chunk:
+            return chunk
+        parts = chunk.split(b'"')
+        inside = self._in_quotes
+        for i, part in enumerate(parts):
+            if i:
+                inside = not inside
+            if inside and part:
+                parts[i] = part.replace(b"\r\n", b" ").replace(b"\n", b" ").replace(b"\r", b" ")
+        self._in_quotes = inside
+        return b'"'.join(parts)
 
     def write(self, data) -> int:
         if isinstance(data, str):
@@ -196,6 +232,8 @@ class _ProgressWriter:
             chunk = header.replace(b"_", b" ") + rest
         else:
             chunk = data
+        if self._single_line:
+            chunk = self._flatten(chunk)
         self._fh.write(chunk)
         self._newlines += chunk.count(b"\n")
         if self.rows >= self._next_report:

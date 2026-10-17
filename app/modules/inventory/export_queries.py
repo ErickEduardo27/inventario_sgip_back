@@ -66,6 +66,7 @@ def _margesi_report_select_sql() -> str:
         COALESCE(m.ccosto_libre, '') AS "Centro Costo Libre",
         COALESCE(m.mar_cont_doc, '') AS "Documento Contable",
         COALESCE(to_char(m.mar_cont_fec, 'YYYY-MM-DD'), '') AS "Fecha Contable",
+        COALESCE(m.mar_cont_val::text, '') AS "Valor Contable",
         COALESCE(m.mar_ing_val::text, '') AS "Valor Adquisicion",
         COALESCE(m.mar_dep_acum::text, '') AS "Depreciacion Acumulada",
         COALESCE(m.mar_net_val::text, '') AS "Valor Neto"
