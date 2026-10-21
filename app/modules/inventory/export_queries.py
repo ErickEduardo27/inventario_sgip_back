@@ -348,6 +348,14 @@ EXPORT_QUERIES.update({
         """
         SELECT
             c.source_kind AS "source kind",
+            CASE c.source_kind
+                WHEN 'conciliado' THEN 'Conciliado'
+                WHEN 'sobrante' THEN 'Sobrante'
+                WHEN 'sobrante_no_conciliable' THEN 'Sobrante no conciliable'
+                WHEN 'faltante' THEN 'Faltante'
+                WHEN 'no_inventariable' THEN 'No inventariable'
+                ELSE c.source_kind
+            END AS "tipo registro",
             c.source_ref_id AS "source ref id",
             c.itemcard_id AS "itemcard id",
             COALESCE(
@@ -357,9 +365,9 @@ EXPORT_QUERIES.update({
                     FROM margesi ma
                     WHERE ma.tenant_id = c.tenant_id
                       AND (
-                        (c.source_kind = 'faltante' AND ma.id = c.source_ref_id)
+                        (c.source_kind IN ('faltante', 'no_inventariable') AND ma.id = c.source_ref_id)
                         OR (
-                            c.source_kind IS DISTINCT FROM 'faltante'
+                            c.source_kind NOT IN ('faltante', 'no_inventariable')
                             AND c.itemcard_id IS NOT NULL
                             AND ma.id = (
                                 SELECT ic.id_margesi

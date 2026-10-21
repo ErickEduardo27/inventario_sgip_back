@@ -32,6 +32,8 @@ def _cors_allow_origins() -> list[str]:
         "https://www.inventario-sgip.onrender.com",
         "https://inventarioqa.redbaron.click",
         "https://www.inventarioqa.redbaron.click",
+        "https://demo.sgip.egora.pe",
+        "https://www.demo.sgip.egora.pe",
     ]
     if settings.frontend_url.strip():
         defaults.append(settings.frontend_url.strip().rstrip("/"))

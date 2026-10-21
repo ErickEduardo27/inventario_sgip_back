@@ -1,10 +1,12 @@
 """SQL del reporte APTOT total (equivalente a ``sp_reporte_aptot_descarga_total`` en MySQL).
 
-Tres clases en ``source_kind``:
-- ``conciliado`` — bienes inventariados con ``itemcards.inv_sit = 'C'``
-- ``sobrante``   — bienes inventariados con ``itemcards.inv_sit = 'S'``
-- ``faltante``   — Margesi sin conciliar con inventario (sin vínculo en ``itemcards``).
+Clases en ``source_kind``:
+- ``conciliado``              — bienes inventariados con ``itemcards.inv_sit = 'C'``
+- ``sobrante``                — bienes inventariados con ``itemcards.inv_sit = 'S'``
+- ``sobrante_no_conciliable`` — bienes inventariados marcados no conciliables (``itemcards.inv_sit = 'N'``)
+- ``faltante``                — Margesi sin conciliar con inventario (sin vínculo en ``itemcards``).
   En datos legacy ``inv_sit`` puede ser ``C16``, ``C14``, etc.; no usar solo ``NULL``/``'N'``.
+- ``no_inventariable``        — Margesi sin vínculo marcado no inventariable (``margesi.inv_sit = 'N'``)
 """
 
 from __future__ import annotations
@@ -32,17 +34,31 @@ def _ic(field: str) -> str:
 
 
 def _piso_descripcion_itemcard_sql() -> str:
-    """Descripción del piso (mismo local y código de piso que el ambiente físico)."""
+    """Descripción del piso del ambiente físico.
+
+    El piso es el ambiente con código ``<código local><piso>`` (p. ej. ``A0204`` para ``A02040103``);
+    si no existe, el primer ambiente del mismo local y piso con descripción.
+    """
     return """
-(
-    SELECT ep.description
-    FROM enviroments ep
-    WHERE ep.tenant_id = itc.tenant_id
-      AND ep.establishment_id = ee.id
-      AND COALESCE(TRIM(ep.floor), '') = COALESCE(TRIM(e.floor), '')
-      AND NULLIF(TRIM(COALESCE(ep.description, '')), '') IS NOT NULL
-    ORDER BY ep.code
-    LIMIT 1
+COALESCE(
+    (
+        SELECT NULLIF(TRIM(epc.description), '')
+        FROM enviroments epc
+        WHERE epc.tenant_id = itc.tenant_id
+          AND epc.establishment_id = ee.id
+          AND epc.code = CONCAT(TRIM(ee.code), TRIM(e.floor))
+        LIMIT 1
+    ),
+    (
+        SELECT ep.description
+        FROM enviroments ep
+        WHERE ep.tenant_id = itc.tenant_id
+          AND ep.establishment_id = ee.id
+          AND COALESCE(TRIM(ep.floor), '') = COALESCE(TRIM(e.floor), '')
+          AND NULLIF(TRIM(COALESCE(ep.description, '')), '') IS NOT NULL
+        ORDER BY ep.code
+        LIMIT 1
+    )
 )
 """
 
@@ -90,12 +106,13 @@ def _sql_text_as_bigint(expr: str) -> str:
         ELSE NULL
     END"""
 
-# Bienes inventariados: conciliados (C) y sobrantes (S).
+# Bienes inventariados: conciliados (C), sobrantes (S) y sobrantes no conciliables (N).
 _ITEMCARD_SELECT = f"""
 SELECT
     itc.tenant_id,
-    CASE
-        WHEN UPPER(TRIM(COALESCE(itc.inv_sit, ''))) = 'C' THEN 'conciliado'
+    CASE UPPER(TRIM(COALESCE(itc.inv_sit, '')))
+        WHEN 'C' THEN 'conciliado'
+        WHEN 'N' THEN 'sobrante_no_conciliable'
         ELSE 'sobrante'
     END AS source_kind,
     itc.id AS source_ref_id,
@@ -139,7 +156,7 @@ SELECT
     e.code,
     e.description,
     e.floor,
-    e.floor,
+    LEFT(COALESCE({_piso_descripcion_itemcard_sql()}, e.description, ''), 100),
     ee.description,
     ee.code,
     d.description,
@@ -182,15 +199,18 @@ LEFT JOIN establishments est ON est.id = env.establishment_id AND est.tenant_id 
 LEFT JOIN departments de ON de.id = est.department_id
 LEFT JOIN persons pe ON pe.tenant_id = itc.tenant_id AND pe.extra->>'codigo_interno' = ma.usu_cod
 WHERE itc.tenant_id = CAST(:tenant_id AS uuid)
-  AND UPPER(TRIM(COALESCE(itc.inv_sit, ''))) IN ('C', 'S')
+  AND UPPER(TRIM(COALESCE(itc.inv_sit, ''))) IN ('C', 'S', 'N')
 """
 
-# Patrimonio Margesi sin conciliar (faltantes): no enlazado a itemcards.
+# Patrimonio Margesi sin conciliar (faltantes y no inventariables): no enlazado a itemcards.
 # Las columnas de inventario se completan con datos de Margesi (no hay hoja de captura).
 _MARGESI_FALTANTE_SELECT = f"""
 SELECT
     m.tenant_id,
-    'faltante'::varchar AS source_kind,
+    CASE
+        WHEN UPPER(TRIM(COALESCE(m.inv_sit, ''))) = 'N' THEN 'no_inventariable'
+        ELSE 'faltante'
+    END::varchar AS source_kind,
     m.id AS source_ref_id,
     :refreshed_at AS refreshed_at,
     NULL AS itemcard_id,

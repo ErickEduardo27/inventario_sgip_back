@@ -513,7 +513,8 @@ class InvUserAssignedBienes(Base, TenantMixin, TimestampMixin):
 class InvReporteAptotCache(Base, TenantMixin):
     """Cache materializado del reporte APTOT descarga total.
 
-    ``source_kind``: ``conciliado`` | ``sobrante`` | ``faltante``
+    ``source_kind``: ``conciliado`` | ``sobrante`` | ``sobrante_no_conciliable`` | ``faltante`` |
+    ``no_inventariable``
     """
 
     __tablename__ = "reporte_aptot_cache"
