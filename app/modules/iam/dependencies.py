@@ -26,6 +26,11 @@ def _has_action(user: User, db: Session, tenant_id: UUID, code: str, action: Per
     return bool(getattr(perms, action))
 
 
+def has_permission(user: User, db: Session, tenant_id: UUID, code: str, action: PermissionAction) -> bool:
+    """Igual que [require_permission] pero sin lanzar: módulo habilitado y acción permitida."""
+    return is_feature_enabled(db, tenant_id, code) and _has_action(user, db, tenant_id, code, action)
+
+
 def require_permission(code: str, action: PermissionAction = "view"):
     """Exige permiso sobre un módulo (`ui_components.code`)."""
 

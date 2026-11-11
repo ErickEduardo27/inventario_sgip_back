@@ -1522,6 +1522,67 @@ def _next_available_inv_num(db: Session, tenant_id: UUID, preferred: int) -> int
     return candidate
 
 
+def _item_card_owner_detail(
+    db: Session,
+    tenant_id: UUID,
+    *,
+    inv_num: int | None = None,
+    id_margesi: int | None = None,
+    exclude_id: int | None = None,
+) -> dict[str, Any] | None:
+    """Bien ya registrado con ese ``inv_num`` (o vinculado a ese Margesi), con su ubicación."""
+    stmt = (
+        select(m.InvItemCard, m.InvCard, m.InvEnvironment, m.InvEstablishment, User)
+        .join(m.InvCard, m.InvCard.id == m.InvItemCard.id_card)
+        .outerjoin(m.InvEnvironment, m.InvEnvironment.id == m.InvCard.id_ambiente)
+        .outerjoin(m.InvEstablishment, m.InvEstablishment.id == m.InvEnvironment.establishment_id)
+        .outerjoin(User, User.id == m.InvCard.id_inventariador)
+        .where(m.InvItemCard.tenant_id == tenant_id)
+    )
+    if inv_num is not None:
+        stmt = stmt.where(m.InvItemCard.inv_num == inv_num)
+    elif id_margesi is not None:
+        stmt = stmt.where(m.InvItemCard.id_margesi == id_margesi)
+    else:
+        return None
+    if exclude_id:
+        stmt = stmt.where(m.InvItemCard.id != exclude_id)
+    row = db.execute(stmt.limit(1)).first()
+    if not row:
+        return None
+    item, card, env, est, inventariador = row
+    return {
+        "item_id": int(item.id),
+        "inv_num": format_inv_num(item.inv_num) if item.inv_num is not None else None,
+        "mar_des": item.mar_des,
+        "mar_num": item.mar_num,
+        "inv_sit": item.inv_sit,
+        "card_id": int(card.id),
+        "hoj_num": format_hoj_num(card.hoj_num) if card.hoj_num is not None else None,
+        "ambiente": (env.description or env.code) if env else None,
+        "local": (est.description or est.code) if est else None,
+        "inventariador": inventariador.full_name if inventariador else None,
+        "created_at": format_datetime_pe(item.created_at) if item.created_at else None,
+    }
+
+
+def item_registered_by_in_open_card(db: Session, tenant_id: UUID, item_id: int, user_id: UUID) -> bool:
+    """El usuario registró este bien y su hoja sigue abierta (puede completarlo, p. ej. adjuntar fotos)."""
+    stmt = (
+        select(m.InvItemRegistrationLog.id)
+        .join(m.InvItemCard, m.InvItemCard.id == m.InvItemRegistrationLog.itemcard_id)
+        .join(m.InvCard, m.InvCard.id == m.InvItemCard.id_card)
+        .where(
+            m.InvItemRegistrationLog.tenant_id == tenant_id,
+            m.InvItemRegistrationLog.itemcard_id == item_id,
+            m.InvItemRegistrationLog.user_id == user_id,
+            m.InvCard.state != 2,
+        )
+        .limit(1)
+    )
+    return db.scalar(stmt) is not None
+
+
 def _validate_card_item_fields(body: CardItemWrite) -> str | None:
     if body.inv_num is None:
         return "Número de inventario obligatorio"
@@ -1654,6 +1715,39 @@ class StoreCardItemResult(NamedTuple):
     message: str
     item_id: int | None = None
     inv_num: int | None = None
+    # Conflicto de unicidad con su detalle (``inv_num_duplicado`` / ``margesi_ya_conciliado``).
+    conflict: dict[str, Any] | None = None
+
+
+def _inv_num_conflict(db: Session, tenant_id: UUID, inv_num: int) -> StoreCardItemResult:
+    owner = _item_card_owner_detail(db, tenant_id, inv_num=inv_num)
+    suggested = _next_available_inv_num(db, tenant_id, inv_num)
+    where = f" en la hoja {owner['hoj_num']}" if owner and owner.get("hoj_num") else ""
+    return StoreCardItemResult(
+        False,
+        f"El N° de inventario {format_inv_num(inv_num)} ya está registrado{where}",
+        conflict={
+            "code": "inv_num_duplicado",
+            "inv_num": format_inv_num(inv_num),
+            "suggested_inv_num": format_inv_num(suggested),
+            "existing": owner,
+        },
+    )
+
+
+def _margesi_conflict(
+    db: Session, tenant_id: UUID, id_margesi: int, exclude_id: int | None = None
+) -> StoreCardItemResult | None:
+    """Un registro Margesi solo puede conciliarse con un bien inventariado."""
+    owner = _item_card_owner_detail(db, tenant_id, id_margesi=id_margesi, exclude_id=exclude_id)
+    if not owner:
+        return None
+    where = f" en la hoja {owner['hoj_num']}" if owner.get("hoj_num") else ""
+    return StoreCardItemResult(
+        False,
+        f"El bien Margesi ya está conciliado con el N° {owner.get('inv_num') or '—'}{where}",
+        conflict={"code": "margesi_ya_conciliado", "id_margesi": id_margesi, "existing": owner},
+    )
 
 
 def store_card_item(
@@ -1686,6 +1780,10 @@ def store_card_item(
     if body.id:
         if _inv_num_in_use(db, tenant_id, requested_inv_num, exclude_id=body.id):
             return StoreCardItemResult(False, "Número de inventario ya registrado")
+        inv_num = requested_inv_num
+    elif body.strict_inv_num:
+        if _inv_num_in_use(db, tenant_id, requested_inv_num):
+            return _inv_num_conflict(db, tenant_id, requested_inv_num)
         inv_num = requested_inv_num
     else:
         inv_num = _next_available_inv_num(db, tenant_id, requested_inv_num)
@@ -1765,6 +1863,10 @@ def store_card_item(
             if marg is None or marg.tenant_id != tenant_id:
                 db.rollback()
                 return StoreCardItemResult(False, "Registro Margesi no encontrado")
+            taken = _margesi_conflict(db, tenant_id, int(marg.id), exclude_id=int(ict.id))
+            if taken:
+                db.rollback()
+                return taken
             mar_cpat_base = body.mar_cpat or marg.mar_cpat or ""
             _link_item_to_margesi(card, ict, marg, mar_cpat=mar_cpat_base)
             db.add(marg)
@@ -1851,6 +1953,9 @@ def store_card_item(
         marg_row = db.get(m.InvMargesiItem, id_margesi)
         if marg_row is None or marg_row.tenant_id != tenant_id:
             return StoreCardItemResult(False, "Registro Margesi no encontrado")
+        taken = _margesi_conflict(db, tenant_id, int(marg_row.id))
+        if taken:
+            return taken
         marg_inv_sit_before = marg_row.inv_sit
         if not mar_cpat_base and marg_row.mar_cpat:
             mar_cpat_base = str(marg_row.mar_cpat).strip()
@@ -1920,6 +2025,8 @@ def store_card_item(
         db.commit()
     except IntegrityError:
         db.rollback()
+        if body.strict_inv_num:
+            return _inv_num_conflict(db, tenant_id, int(inv_num))
         return StoreCardItemResult(False, "Número de inventario ya registrado")
     from app.modules.inventory.dashboard_establishment_stats_cache import (
         establishment_ids_for_card,

@@ -215,13 +215,44 @@ class CopyCompatTests(unittest.TestCase):
 class ItemPhotosZipTests(unittest.TestCase):
     """ZIP de fotos por local: nombres, partes y generación en streaming."""
 
+    BASE_URL = "https://storage.googleapis.com/b/item-photos/t/x"
+
+    def _row(self, id, inv_num, sit, mar_num=None, f1=None, f2=None, f3=None):
+        return SimpleNamespace(id=id, inv_num=inv_num, inv_sit=sit, mar_num=mar_num, foto1=f1, foto2=f2, foto3=f3)
+
     def test_entry_names_follow_slot_nomenclature(self):
         from app.modules.exports.item_photos import Photo
 
-        base = "https://storage.googleapis.com/b/item-photos/t/x"
-        self.assertEqual(Photo("12345", 1, base + ".jpg").entry_name, "12345-I.jpg")
-        self.assertEqual(Photo("12345", 2, base + ".jpeg?v=1").entry_name, "12345-P.jpeg")
-        self.assertEqual(Photo("12345", 3, base).entry_name, "12345-S.jpg")
+        base = self.BASE_URL
+        self.assertEqual(Photo("conformes", "387148", 1, base + ".jpg").entry_name, "conformes/387148_I.jpg")
+        self.assertEqual(Photo("conformes", "387148", 2, base + ".jpeg?v=1").entry_name, "conformes/387148_P.jpeg")
+        self.assertEqual(Photo("sobrantes", "000123", 3, base + ".PNG").entry_name, "sobrantes/000123_S.png")
+
+    def test_conformes_use_codigo_interno_and_sobrantes_inv_num_6_digits(self):
+        from app.modules.exports.item_photos import photos_for_rows
+
+        u = self.BASE_URL
+        rows = [
+            self._row(1, 14001, "C", " 387148 ", u + "1.jpg", u + "2.jpg", u + "3.png"),
+            self._row(2, 123, "S", None, u + "a.jpg", None, u + "c.jpg"),
+            self._row(3, 999, "N", "555", u + "n.jpg"),  # no conciliable: fuera del ZIP
+            self._row(4, 1234567, "s", None, u + "b.jpg"),  # más de 6 dígitos: no se recorta
+        ]
+        names = [p.entry_name for p in photos_for_rows(rows)]
+        self.assertEqual(names, [
+            "conformes/387148_I.jpg", "conformes/387148_P.jpg", "conformes/387148_S.png",
+            "sobrantes/000123_I.jpg", "sobrantes/000123_S.jpg",
+            "sobrantes/1234567_I.jpg",
+        ])
+
+    def test_repeated_names_are_disambiguated(self):
+        from app.modules.exports.item_photos import photos_for_rows
+
+        u = self.BASE_URL
+        rows = [self._row(1, 1, "C", "A/1", u + "x.jpg"), self._row(2, 2, "C", "A/1", u + "y.jpg"),
+                self._row(3, 3, "C", None, u + "z.jpg")]
+        names = [p.entry_name for p in photos_for_rows(rows)]
+        self.assertEqual(names, ["conformes/A_1_I.jpg", "conformes/A_1__2_I.jpg", "conformes/sin_codigo_000003_I.jpg"])
 
     def test_parse_filters_only_takes_local_and_part(self):
         from app.modules.exports.item_photos import parse_filters
@@ -248,7 +279,7 @@ class ItemPhotosZipTests(unittest.TestCase):
         with mock.patch.object(item_photos, "load_manifest", return_value=self._manifest()):
             run, key = item_photos.resolve(mock.Mock(), uuid.uuid4(), {"establishment_id": 7, "part": 2}, {}, False)
         self.assertEqual(run, {"establishment_id": 7, "part": 2, "parts": 2, "id_from": 51, "id_to": 90})
-        self.assertEqual(key, {"establishment_id": 7, "part": 2, "parts": 2, "version": "v1"})
+        self.assertEqual(key, {"establishment_id": 7, "part": 2, "parts": 2, "version": "v1", "layout": 2})
 
     def test_resolve_without_plan(self):
         from app.modules.exports import item_photos
@@ -305,7 +336,7 @@ class ItemPhotosZipTests(unittest.TestCase):
         for a, b in zip(plan["parts"], plan["parts"][1:]):
             self.assertLess(a["id_to"], b["id_from"])
 
-    def test_generate_writes_ordered_zip_and_missing_report(self):
+    def test_generate_writes_conformes_and_sobrantes_folders(self):
         import tempfile
         import zipfile
         from pathlib import Path
@@ -313,12 +344,11 @@ class ItemPhotosZipTests(unittest.TestCase):
         from app.modules.exports import item_photos
         from app.modules.exports.specs import StoredOutput
 
-        photos = [
-            item_photos.Photo("100", 1, "https://x/100_1.jpg"),
-            item_photos.Photo("100", 2, "https://x/100_2.jpg"),
-            item_photos.Photo("101", 1, "https://x/101_1.jpg"),
-            item_photos.Photo("101", 3, "https://x/roto.jpg"),
-        ]
+        photos = item_photos.photos_for_rows([
+            self._row(5, 14001, "C", "387148", "https://x/100_1.jpg", "https://x/100_2.jpeg"),
+            self._row(6, 101, "S", None, "https://x/101_1.png", None, "https://x/roto.jpg"),
+            self._row(7, 102, "N", "999", "https://x/102_1.jpg"),
+        ])
 
         def fake_read(url, _tenant):
             return None if "roto" in url else (url.encode(), "image/jpeg")
@@ -338,26 +368,25 @@ class ItemPhotosZipTests(unittest.TestCase):
                 self.assertEqual(
                     names,
                     [
-                        "A01_SEDE_PRINCIPAL/100-I.jpg",
-                        "A01_SEDE_PRINCIPAL/100-P.jpg",
-                        "A01_SEDE_PRINCIPAL/101-I.jpg",
-                        "A01_SEDE_PRINCIPAL/_fotos_no_disponibles.txt",
+                        "conformes/387148_I.jpg",
+                        "conformes/387148_P.jpeg",
+                        "sobrantes/000101_I.png",
+                        "_fotos_no_disponibles.txt",
                     ],
                 )
-                self.assertEqual(zf.read("A01_SEDE_PRINCIPAL/100-P.jpg"), b"https://x/100_2.jpg")
-                self.assertIn(b"101-S.jpg", zf.read("A01_SEDE_PRINCIPAL/_fotos_no_disponibles.txt"))
+                self.assertEqual(zf.read("conformes/387148_P.jpeg"), b"https://x/100_2.jpeg")
+                self.assertIn(b"sobrantes/000101_S.jpg", zf.read("_fotos_no_disponibles.txt"))
                 self.assertIsNone(zf.testzip())
 
 
-class GcsStreamingTests(unittest.TestCase):
-    """El ZIP va en streaming a GCS: el BlobWriter real rechaza flush() salvo con ignore_flush=True."""
+class CloudStreamingTests(unittest.TestCase):
+    """El ZIP va en streaming al almacenamiento en la nube; un fallo no debe confirmar la subida."""
 
-    def _fake_blob_writer(self):
-        uploaded = {}
+    def _fake_stream(self):
+        uploaded = {"finalized": False, "aborted": False}
 
-        class FakeBlobWriter:
-            def __init__(self, ignore_flush=False, **_kw):
-                self.ignore_flush = ignore_flush
+        class FakeWriter:
+            def __init__(self):
                 self.buf = io.BytesIO()
                 self.closed = False
 
@@ -365,58 +394,76 @@ class GcsStreamingTests(unittest.TestCase):
                 return self.buf.write(data)
 
             def flush(self):
-                if not self.ignore_flush:
-                    raise io.UnsupportedOperation("Cannot flush without finalizing upload.")
+                return None
 
             def close(self):
                 self.closed = True
                 uploaded["data"] = self.buf.getvalue()
 
-        def open_(mode, **kw):
-            self.assertEqual(mode, "wb")
-            writer = FakeBlobWriter(**kw)
-            uploaded["writer"] = writer
-            return writer
+        writer = FakeWriter()
+        uploaded["writer"] = writer
 
-        client = mock.Mock()
-        client.bucket.return_value.blob.return_value.open.side_effect = open_
-        return client, uploaded
+        def open_write_stream(object_key, *, content_type=None):
+            return writer, object_key
 
-    def test_zip_streams_to_gcs_and_finalizes_on_close(self):
+        def finalize_write_stream(fh):
+            uploaded["finalized"] = True
+            fh.close()
+
+        def abort_write_stream(fh):
+            uploaded["aborted"] = True
+            try:
+                fh.close()
+            except Exception:
+                pass
+
+        return uploaded, open_write_stream, finalize_write_stream, abort_write_stream
+
+    def test_zip_streams_and_finalizes_on_close(self):
         import zipfile
 
-        from app.core import export_storage
+        from app.core import export_storage, object_storage
 
-        client, uploaded = self._fake_blob_writer()
-        settings = SimpleNamespace(gcs_bucket="bucket", gcs_export_prefix="exports")
+        uploaded, open_write_stream, finalize_write_stream, abort_write_stream = self._fake_stream()
+        settings = SimpleNamespace(gcs_bucket="", gcs_export_prefix="exports", r2_bucket="bucket")
         with mock.patch.object(export_storage, "get_settings", return_value=settings), \
-                mock.patch.object(export_storage, "_gcs_client", return_value=client):
+                mock.patch.object(object_storage, "cloud_enabled", return_value=True), \
+                mock.patch.object(export_storage.obj, "cloud_enabled", return_value=True), \
+                mock.patch.object(export_storage.obj, "open_write_stream", side_effect=open_write_stream), \
+                mock.patch.object(export_storage.obj, "finalize_write_stream", side_effect=finalize_write_stream), \
+                mock.patch.object(export_storage.obj, "abort_write_stream", side_effect=abort_write_stream):
             with export_storage.open_export_writer(
                 module="item_photos_zip", tenant_id=uuid.uuid4(), job_id=uuid.uuid4(), filename="fotos.zip"
             ) as target:
                 with zipfile.ZipFile(target.fh, "w", compression=zipfile.ZIP_STORED, allowZip64=True) as zf:
                     zf.writestr("A01/1-I.jpg", b"foto")
                 self.assertFalse(uploaded["writer"].closed, "no se finaliza antes de terminar")
-        self.assertTrue(uploaded["writer"].ignore_flush)
+        self.assertTrue(uploaded["finalized"])
+        self.assertFalse(uploaded["aborted"])
         self.assertTrue(uploaded["writer"].closed)
         self.assertEqual(target.size, len(uploaded["data"]))
         with zipfile.ZipFile(io.BytesIO(uploaded["data"])) as zf:
             self.assertEqual(zf.read("A01/1-I.jpg"), b"foto")
 
     def test_failed_generation_does_not_finalize_upload(self):
-        from app.core import export_storage
+        from app.core import export_storage, object_storage
 
-        client, uploaded = self._fake_blob_writer()
-        settings = SimpleNamespace(gcs_bucket="bucket", gcs_export_prefix="exports")
+        uploaded, open_write_stream, finalize_write_stream, abort_write_stream = self._fake_stream()
+        settings = SimpleNamespace(gcs_bucket="", gcs_export_prefix="exports", r2_bucket="bucket")
         with mock.patch.object(export_storage, "get_settings", return_value=settings), \
-                mock.patch.object(export_storage, "_gcs_client", return_value=client):
+                mock.patch.object(object_storage, "cloud_enabled", return_value=True), \
+                mock.patch.object(export_storage.obj, "cloud_enabled", return_value=True), \
+                mock.patch.object(export_storage.obj, "open_write_stream", side_effect=open_write_stream), \
+                mock.patch.object(export_storage.obj, "finalize_write_stream", side_effect=finalize_write_stream), \
+                mock.patch.object(export_storage.obj, "abort_write_stream", side_effect=abort_write_stream):
             with self.assertRaises(ValueError):
                 with export_storage.open_export_writer(
                     module="item_photos_zip", tenant_id=uuid.uuid4(), job_id=uuid.uuid4(), filename="fotos.zip"
                 ) as target:
                     target.fh.write(b"parcial")
                     raise ValueError("fallo")
-        self.assertFalse(uploaded["writer"].closed, "un ZIP a medias no debe quedar en GCS")
+        self.assertTrue(uploaded["aborted"], "un ZIP a medias no debe quedar en el bucket")
+        self.assertFalse(uploaded["finalized"])
 
 
 if __name__ == "__main__":

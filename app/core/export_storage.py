@@ -1,4 +1,4 @@
-"""Almacenamiento de exportaciones CSV (GCS en producción, local en dev)."""
+"""Almacenamiento de exportaciones (R2/GCS en producción, local en dev)."""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ from pathlib import Path
 from uuid import UUID
 
 from app.core.config import get_settings
+from app.core import object_storage as obj
 
 LOCAL_PREFIX = "local:"
 
@@ -42,20 +43,15 @@ def upload_export_file(
     filename: str,
     content: bytes,
 ) -> str:
-    """Sube bytes y devuelve la ruta de objeto (GCS key o ``local:/path``)."""
-    settings = get_settings()
-    if settings.gcs_bucket:
-        from google.cloud import storage
-
+    """Sube bytes y devuelve la ruta de objeto (clave R2/GCS o ``local:/path``)."""
+    if obj.cloud_enabled():
         object_key = build_export_object_key(
             module=module,
             tenant_id=tenant_id,
             job_id=job_id,
             filename=filename,
         )
-        client = _gcs_client()
-        blob = client.bucket(settings.gcs_bucket).blob(object_key)
-        blob.upload_from_string(content, content_type=_content_type(filename))
+        obj.upload_bytes(object_key, content, content_type=_content_type(filename))
         return object_key
 
     suffix = Path(filename).suffix or ".csv"
@@ -77,18 +73,15 @@ def upload_export_path(
     file_path: str | Path,
 ) -> str:
     """Como ``upload_export_file`` pero desde un archivo en disco (sin cargarlo entero en memoria)."""
-    settings = get_settings()
     source = Path(file_path)
-    if settings.gcs_bucket:
+    if obj.cloud_enabled():
         object_key = build_export_object_key(
             module=module,
             tenant_id=tenant_id,
             job_id=job_id,
             filename=filename,
         )
-        client = _gcs_client()
-        blob = client.bucket(settings.gcs_bucket).blob(object_key)
-        blob.upload_from_filename(str(source), content_type=_content_type(filename))
+        obj.upload_file(object_key, str(source), content_type=_content_type(filename))
         return object_key
 
     suffix = Path(filename).suffix or ".csv"
@@ -110,8 +103,6 @@ class _CountingWriter:
         return n if n is not None else len(data)
 
     def flush(self) -> None:
-        # zipfile llama a flush() al cerrar. En GCS (subida reanudable) no se puede vaciar sin finalizar:
-        # la subida se confirma con close() en ``open_export_writer``.
         flush = getattr(self._raw, "flush", None)
         if flush:
             try:
@@ -137,25 +128,18 @@ class ExportStreamTarget:
 
 @contextmanager
 def open_export_writer(*, module: str, tenant_id: UUID, job_id: UUID, filename: str):
-    """Escribe una exportación directo al almacenamiento, en streaming (sin archivo intermedio).
-
-    En GCS usa una subida reanudable por bloques: la memoria no crece con el tamaño del archivo y la subida
-    ocurre mientras se genera. Si el generador falla, la subida no se finaliza (no queda objeto a medias).
-    """
-    settings = get_settings()
-    if settings.gcs_bucket:
+    """Escribe una exportación directo al almacenamiento, en streaming (sin archivo intermedio)."""
+    if obj.cloud_enabled():
         object_key = build_export_object_key(module=module, tenant_id=tenant_id, job_id=job_id, filename=filename)
-        blob = _gcs_client().bucket(settings.gcs_bucket).blob(object_key)
-        raw = blob.open(
-            "wb",
-            chunk_size=16 * 1024 * 1024,
-            content_type=_content_type(filename),
-            # BlobWriter rechaza flush() por defecto; zipfile lo llama al cerrar el ZIP.
-            ignore_flush=True,
-        )
-        target = ExportStreamTarget(_CountingWriter(raw), object_key)
-        yield target
-        raw.close()  # solo si no hubo error: confirma la subida
+        raw, key = obj.open_write_stream(object_key, content_type=_content_type(filename))
+        target = ExportStreamTarget(_CountingWriter(raw), key)
+        try:
+            yield target
+        except BaseException:
+            obj.abort_write_stream(raw)
+            raise
+        else:
+            obj.finalize_write_stream(raw)
         return
 
     suffix = Path(filename).suffix or ".bin"
@@ -174,24 +158,20 @@ def read_export_file(storage_path: str) -> bytes:
     if storage_path.startswith(LOCAL_PREFIX):
         return Path(storage_path[len(LOCAL_PREFIX) :]).read_bytes()
 
-    settings = get_settings()
-    if not settings.gcs_bucket:
-        raise RuntimeError("GCS_BUCKET no configurado")
-    client = _gcs_client()
-    blob = client.bucket(settings.gcs_bucket).blob(storage_path)
-    return blob.download_as_bytes()
+    if not obj.cloud_enabled():
+        raise RuntimeError("Almacenamiento en la nube no configurado (R2_BUCKET o GCS_BUCKET)")
+    return obj.download_bytes(storage_path)
 
 
 def export_object_exists(storage_path: str | None) -> bool:
-    """¿Sigue el archivo en el almacenamiento? (p. ej. una regla de ciclo de vida de GCS pudo borrarlo)."""
+    """¿Sigue el archivo en el almacenamiento?"""
     if not storage_path:
         return False
     if storage_path.startswith(LOCAL_PREFIX):
         return Path(storage_path[len(LOCAL_PREFIX) :]).is_file()
-    settings = get_settings()
-    if not settings.gcs_bucket:
+    if not obj.cloud_enabled():
         return False
-    return bool(_gcs_client().bucket(settings.gcs_bucket).blob(storage_path).exists())
+    return obj.object_exists(storage_path)
 
 
 def delete_export_object(storage_path: str | None) -> None:
@@ -201,23 +181,17 @@ def delete_export_object(storage_path: str | None) -> None:
     if storage_path.startswith(LOCAL_PREFIX):
         Path(storage_path[len(LOCAL_PREFIX) :]).unlink(missing_ok=True)
         return
-    settings = get_settings()
-    if not settings.gcs_bucket:
+    if not obj.cloud_enabled():
         return
-    from google.api_core.exceptions import NotFound
-
-    try:
-        _gcs_client().bucket(settings.gcs_bucket).blob(storage_path).delete()
-    except NotFound:
-        pass
+    obj.delete_object(storage_path)
 
 
 def _export_json_location(name: str) -> tuple[str, Path | None]:
-    """Clave GCS (o ruta local en desarrollo) de un JSON auxiliar de exportaciones (p. ej. manifiestos)."""
+    """Clave de objeto (o ruta local en desarrollo) de un JSON auxiliar de exportaciones."""
     settings = get_settings()
     prefix = (settings.gcs_export_prefix or "exports").strip("/") or "exports"
     key = f"{prefix}/{name.strip('/')}"
-    if settings.gcs_bucket:
+    if obj.cloud_enabled():
         return key, None
     return key, Path(tempfile.gettempdir()) / "sgip_exports" / name.strip("/")
 
@@ -228,12 +202,9 @@ def read_export_json(name: str) -> dict | None:
     key, local = _export_json_location(name)
     if local is not None:
         return json.loads(local.read_text(encoding="utf-8")) if local.is_file() else None
-    from google.api_core.exceptions import NotFound
-
-    settings = get_settings()
     try:
-        raw = _gcs_client().bucket(settings.gcs_bucket).blob(key).download_as_bytes()
-    except NotFound:
+        raw = obj.download_bytes(key)
+    except Exception:
         return None
     return json.loads(raw.decode("utf-8"))
 
@@ -247,8 +218,7 @@ def write_export_json(name: str, data: dict) -> None:
         local.parent.mkdir(parents=True, exist_ok=True)
         local.write_text(payload, encoding="utf-8")
         return
-    settings = get_settings()
-    _gcs_client().bucket(settings.gcs_bucket).blob(key).upload_from_string(payload, content_type="application/json")
+    obj.upload_bytes(key, payload.encode("utf-8"), content_type="application/json")
 
 
 def delete_export_json(name: str) -> None:
@@ -265,24 +235,15 @@ def generate_signed_download_url(
     filename: str,
     expiration_minutes: int | None = None,
 ) -> tuple[str, datetime]:
-    settings = get_settings()
-    if not settings.gcs_bucket:
-        raise RuntimeError("GCS_BUCKET no configurado")
-
-    ttl = expiration_minutes if expiration_minutes is not None else settings.gcs_export_signed_url_ttl_minutes
-    expires_at = datetime.now(timezone.utc) + timedelta(minutes=max(1, ttl))
-    blob = _gcs_client().bucket(settings.gcs_bucket).blob(object_key)
-    url = blob.generate_signed_url(
-        version="v4",
-        expiration=expires_at,
-        method="GET",
-        response_disposition=f'attachment; filename="{_safe_filename(filename)}"',
+    return obj.generate_signed_download_url(
+        object_key,
+        filename=_safe_filename(filename),
+        expiration_minutes=expiration_minutes,
     )
-    return url, expires_at
 
 
 def build_api_download_url(job_id: UUID) -> str:
-    """URL del proxy API para descargas locales (sin GCS)."""
+    """URL del proxy API para descargas locales (sin nube)."""
     settings = get_settings()
     base = (settings.public_api_base_url or "").strip().rstrip("/") or "http://127.0.0.1:8000"
     return f"{base}/api/inventory/descarga-archivos/{job_id}/file"
@@ -294,7 +255,7 @@ def resolve_download_url(
     filename: str,
     job_id: UUID,
 ) -> tuple[str, datetime | None]:
-    """Devuelve URL firmada de GCS o proxy API en desarrollo local."""
+    """Devuelve URL firmada (R2/GCS) o proxy API en desarrollo local."""
     if storage_path.startswith(LOCAL_PREFIX):
         return build_api_download_url(job_id), None
 
@@ -322,13 +283,3 @@ def refresh_download_url_if_needed(
 
     url, new_expires = generate_signed_download_url(storage_path, filename=filename)
     return url, new_expires
-
-
-def _gcs_client():
-    from google.cloud import storage
-
-    settings = get_settings()
-    creds = settings.google_application_credentials.strip()
-    if creds:
-        return storage.Client.from_service_account_json(creds)
-    return storage.Client()

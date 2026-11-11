@@ -152,7 +152,35 @@ def bootstrap(db: Session, tenant_id: UUID, user: User) -> dict[str, Any]:
         "assigned_establishments": establishments,
         "open_cards": cards,
         "user_conf": tables.get("user_conf") or {},
+        "used_inv_nums": _used_inv_nums_for_user(db, tenant_id, user),
     }
+
+
+_USED_INV_WINDOW = 5_000
+_USED_INV_MAX = 20_000
+
+
+def _used_inv_nums_for_user(db: Session, tenant_id: UUID, user: User) -> dict[str, Any]:
+    """N° de inventario ya registrados en el rango de etiquetas del usuario.
+
+    La app los usa sin Internet para no proponer ni aceptar un N° que ya existe en la base.
+    Sin rango configurado se toma una ventana desde la etiqueta actual.
+    """
+    lo = user.eti_ini or user.eti_act
+    if lo is None:
+        return {"from": None, "to": None, "numbers": []}
+    hi = user.eti_fin if user.eti_fin and user.eti_fin >= lo else lo + _USED_INV_WINDOW
+    hi = min(hi, lo + _USED_INV_MAX)
+    numbers = db.scalars(
+        select(m.InvItemCard.inv_num)
+        .where(
+            m.InvItemCard.tenant_id == tenant_id,
+            m.InvItemCard.inv_num >= lo,
+            m.InvItemCard.inv_num <= hi,
+        )
+        .order_by(m.InvItemCard.inv_num.asc())
+    ).all()
+    return {"from": int(lo), "to": int(hi), "numbers": [int(n) for n in numbers if n is not None]}
 
 
 def catalog_index(

@@ -8,7 +8,14 @@ Volumen real: hasta ~31 mil bienes y ~78 mil fotos en un solo local (≈ 20 GB).
 - **ZIP en streaming directo a GCS** (sin disco intermedio; memoria acotada) y sin recomprimir (las JPEG ya
   vienen comprimidas: ``ZIP_STORED`` es mucho más rápido y el tamaño es el mismo).
 
-Nombres dentro del ZIP: ``{inv_num}-I`` (foto 1), ``{inv_num}-P`` (foto 2), ``{inv_num}-S`` (foto 3).
+Estructura del ZIP (``LAYOUT_VERSION`` 2):
+
+- ``conformes/``: bienes conciliados (``inv_sit = 'C'``), nombrados por código interno (``mar_num``):
+  ``{mar_num}_I`` (foto 1), ``{mar_num}_P`` (foto 2), ``{mar_num}_S`` (foto 3).
+- ``sobrantes/``: bienes sobrantes (``inv_sit = 'S'``), nombrados por N° de inventario a 6 dígitos:
+  ``000123_I``, ``000123_P``, ``000123_S``.
+
+Se conserva la extensión de la foto. Los bienes con otra situación (``N`` = no conciliable) no se incluyen.
 """
 
 from __future__ import annotations
@@ -36,6 +43,14 @@ DOWNLOAD_THREADS = 16
 #: Fotos descargadas por adelantado (memoria acotada: ~64 × 300 KB).
 PREFETCH = 64
 SLOT_SUFFIX = {1: "I", 2: "P", 3: "S"}
+#: Cambia cuando cambia la estructura interna del ZIP: forma parte de la clave de los ZIP guardados, así
+#: los generados con la estructura anterior no se vuelven a ofrecer.
+LAYOUT_VERSION = 2
+CONFORMES = "conformes"
+SOBRANTES = "sobrantes"
+#: inv_sit → carpeta del ZIP.
+SITUATION_FOLDER = {"C": CONFORMES, "S": SOBRANTES}
+INV_NUM_DIGITS = 6
 
 _PHOTO_COLUMNS = """
     NULLIF(TRIM(COALESCE(ic.extra->>'mar_foto', ic.extra->>'foto_bien', '')), '') AS foto1,
@@ -43,14 +58,15 @@ _PHOTO_COLUMNS = """
     NULLIF(TRIM(COALESCE(ic.extra->>'mar_foto3', ic.extra->>'foto3_bien', '')), '') AS foto3
 """
 
-# Bienes del local (vía hoja → ambiente → local) con al menos una foto.
+# Bienes conformes o sobrantes del local (vía hoja → ambiente → local) con al menos una foto.
 _ITEMS_SQL = f"""
-SELECT ic.id, ic.inv_num, {_PHOTO_COLUMNS}
+SELECT ic.id, ic.inv_num, ic.mar_num, UPPER(TRIM(ic.inv_sit)) AS inv_sit, {_PHOTO_COLUMNS}
 FROM itemcards ic
 JOIN cards c ON c.id = ic.id_card AND c.tenant_id = ic.tenant_id
 JOIN enviroments env ON env.id = c.id_ambiente AND env.tenant_id = c.tenant_id
 WHERE ic.tenant_id = CAST(:tenant_id AS uuid)
   AND env.establishment_id = :establishment_id
+  AND UPPER(TRIM(COALESCE(ic.inv_sit, ''))) IN ('C', 'S')
   AND COALESCE(ic.extra->>'mar_foto', ic.extra->>'foto_bien', ic.extra->>'mar_foto2', ic.extra->>'foto2_bien',
                ic.extra->>'mar_foto3', ic.extra->>'foto3_bien', '') <> ''
 """
@@ -58,13 +74,54 @@ WHERE ic.tenant_id = CAST(:tenant_id AS uuid)
 
 @dataclass(frozen=True)
 class Photo:
-    inv_num: str
+    folder: str
+    base: str
     slot: int
     url: str
 
     @property
     def entry_name(self) -> str:
-        return f"{self.inv_num}-{SLOT_SUFFIX[self.slot]}{_extension(self.url)}"
+        return f"{self.folder}/{self.base}_{SLOT_SUFFIX[self.slot]}{_extension(self.url)}"
+
+
+def _inv_num_6(inv_num: Any) -> str:
+    return str(inv_num).strip().zfill(INV_NUM_DIGITS)
+
+
+def _file_base(text_value: str) -> str:
+    """Código apto como nombre de archivo (sin separadores de ruta ni caracteres reservados)."""
+    return re.sub(r'[\\/:*?"<>|\s]+', "_", text_value.strip()).strip("._")
+
+
+def photo_base(row) -> tuple[str, str] | None:
+    """(carpeta, nombre base) del bien, o ``None`` si su situación no va en el ZIP."""
+    folder = SITUATION_FOLDER.get(str(row.inv_sit or "").strip().upper())
+    if folder is None:
+        return None
+    inv = _inv_num_6(row.inv_num) if row.inv_num is not None else f"sin_numero_{row.id}"
+    if folder == SOBRANTES:
+        return folder, inv
+    code = _file_base(str(row.mar_num or ""))
+    # Conciliado sin código interno (no debería ocurrir): se identifica por N° de inventario.
+    return folder, code or f"sin_codigo_{inv}"
+
+
+def photos_for_rows(rows) -> list[Photo]:
+    """Fotos 1/2/3 de cada bien con su nombre final; nombres repetidos se desambiguan con el id del bien."""
+    photos: list[Photo] = []
+    used: set[str] = set()
+    for row in rows:
+        target = photo_base(row)
+        if target is None:
+            continue
+        folder, base = target
+        if f"{folder}/{base}" in used:
+            base = f"{base}__{row.id}"
+        used.add(f"{folder}/{base}")
+        for slot, url in ((1, row.foto1), (2, row.foto2), (3, row.foto3)):
+            if url:
+                photos.append(Photo(folder, base, slot, url))
+    return photos
 
 
 def _extension(url: str) -> str:
@@ -205,7 +262,13 @@ def resolve(
         "id_from": int(part["id_from"]),
         "id_to": int(part["id_to"]),
     }
-    key = {"establishment_id": est_id, "part": full_run["part"], "parts": full_run["parts"], "version": manifest["version"]}
+    key = {
+        "establishment_id": est_id,
+        "part": full_run["part"],
+        "parts": full_run["parts"],
+        "version": manifest["version"],
+        "layout": LAYOUT_VERSION,
+    }
     return full_run, key
 
 
@@ -228,16 +291,12 @@ def reset_local(db: Session, tenant_id: UUID, establishment_id: int) -> dict[str
     manifest = load_manifest(tenant_id, establishment_id)
     if manifest:
         parts = manifest.get("parts") or []
-        keys = [
-            service.build_request_key(
-                MODULE,
-                tenant_id,
-                {"establishment_id": establishment_id, "part": int(p["part"]), "parts": len(parts), "version": manifest["version"]},
-                "zip",
-                TENANT_SCOPE,
-            )
-            for p in parts
-        ]
+        keys = []
+        for p in parts:
+            base_key = {"establishment_id": establishment_id, "part": int(p["part"]), "parts": len(parts), "version": manifest["version"]}
+            # También los ZIP guardados con la estructura anterior (clave sin ``layout``).
+            for key_params in (base_key, {**base_key, "layout": LAYOUT_VERSION}):
+                keys.append(service.build_request_key(MODULE, tenant_id, key_params, "zip", TENANT_SCOPE))
         rows = db.query(InvDescargaArchivo).filter(
             InvDescargaArchivo.tenant_id == tenant_id,
             InvDescargaArchivo.module == MODULE,
@@ -286,13 +345,7 @@ def _load_photos(tenant_id: UUID, params: dict[str, Any]) -> tuple[list[Photo], 
         rows = db.execute(text(sql), bind).all()
         code = str(est.code or est.id).strip()
         description = str(est.description or "").strip()
-    photos: list[Photo] = []
-    for row in rows:
-        inv = str(row.inv_num) if row.inv_num is not None else f"sin_numero_{row.id}"
-        for slot, url in ((1, row.foto1), (2, row.foto2), (3, row.foto3)):
-            if url:
-                photos.append(Photo(inv, slot, url))
-    return photos, code, description
+    return photos_for_rows(rows), code, description
 
 
 def generate(ctx: "ExportContext", tenant_id: UUID, params: dict[str, Any], _export_format: str):
@@ -301,14 +354,13 @@ def generate(ctx: "ExportContext", tenant_id: UUID, params: dict[str, Any], _exp
     from app.modules.exports.specs import StoredOutput
 
     ctx.progress(2, "Buscando fotos del local…", force=True)
-    photos, code, description = _load_photos(tenant_id, params)
+    photos, code, _description = _load_photos(tenant_id, params)
     if not photos:
-        raise ValueError("El local no tiene fotos de bienes para descargar")
+        raise ValueError("El local no tiene fotos de bienes conformes ni sobrantes para descargar")
 
     parts = int(params.get("parts") or 1)
     part_suffix = f"_parte{params['part']}de{parts}" if parts > 1 else ""
     filename = f"fotos_{_safe(code)}{part_suffix}_{date.today().isoformat()}.zip"
-    folder = _safe(f"{code} {description}") if description else _safe(code)
     total = len(photos)
     missing: list[str] = []
     stamp = datetime.now().timetuple()[:6]
@@ -343,7 +395,7 @@ def generate(ctx: "ExportContext", tenant_id: UUID, params: dict[str, Any], _exp
                     if data is None:
                         missing.append(f"{photo.entry_name}\t{photo.url}")
                     else:
-                        info = zipfile.ZipInfo(f"{folder}/{photo.entry_name}", date_time=stamp)
+                        info = zipfile.ZipInfo(photo.entry_name, date_time=stamp)
                         info.compress_type = zipfile.ZIP_STORED
                         zf.writestr(info, data)
                     done += 1
@@ -358,7 +410,7 @@ def generate(ctx: "ExportContext", tenant_id: UUID, params: dict[str, Any], _exp
                     "Fotos registradas en el sistema que no se pudieron leer del almacenamiento.\n"
                     "archivo\turl\n" + "\n".join(missing) + "\n"
                 )
-                zf.writestr(zipfile.ZipInfo(f"{folder}/_fotos_no_disponibles.txt", date_time=stamp), report.encode("utf-8"))
+                zf.writestr(zipfile.ZipInfo("_fotos_no_disponibles.txt", date_time=stamp), report.encode("utf-8"))
         if len(missing) == total:
             raise ValueError("No se pudo leer ninguna foto del almacenamiento")
         ctx.progress(98, "Finalizando el archivo…", force=True)

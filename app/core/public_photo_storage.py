@@ -1,6 +1,6 @@
 """Fotos servidas por URL pública no adivinable (personas, bienes margesi, ambientes de locales).
 
-GCS en producción, disco local en desarrollo. En ambos casos la foto se sirve por
+R2/GCS en producción, disco local en desarrollo. En ambos casos la foto se sirve por
 ``/api/public/{kind}-photo/{tenant_id}/{filename}``; el nombre de archivo es un UUID aleatorio.
 La ruta relativa devuelta cabe en columnas cortas (≈100 caracteres).
 """
@@ -15,6 +15,7 @@ from typing import Literal
 from uuid import UUID
 
 from app.core.config import get_settings
+from app.core import object_storage as obj
 
 PhotoKind = Literal["person", "margesi", "establishment"]
 
@@ -66,15 +67,6 @@ def _object_key(kind: PhotoKind, tenant_id: UUID, filename: str) -> str:
     return f"{_KINDS[kind].gcs_prefix(kind)}/{tenant_id}/{filename}"
 
 
-def _gcs_bucket():
-    from google.cloud import storage
-
-    settings = get_settings()
-    creds = settings.google_application_credentials.strip()
-    client = storage.Client.from_service_account_json(creds) if creds else storage.Client()
-    return client.bucket(settings.gcs_bucket)
-
-
 def public_path(kind: PhotoKind, tenant_id: UUID, filename: str) -> str:
     return f"/api/public/{_KINDS[kind].route_segment}/{tenant_id}/{filename}"
 
@@ -91,8 +83,8 @@ def upload_photo(kind: PhotoKind, *, tenant_id: UUID, content: bytes) -> str:
     ext, mime = detected
     filename = f"{uuid.uuid4().hex}.{ext}"
 
-    if get_settings().gcs_bucket:
-        _gcs_bucket().blob(_object_key(kind, tenant_id, filename)).upload_from_string(content, content_type=mime)
+    if obj.cloud_enabled():
+        obj.upload_bytes(_object_key(kind, tenant_id, filename), content, content_type=mime)
     else:
         base = _local_dir(kind, tenant_id)
         base.mkdir(parents=True, exist_ok=True)
@@ -105,9 +97,9 @@ def read_photo(kind: PhotoKind, tenant_id: UUID, filename: str) -> tuple[bytes, 
     if not m:
         return None
     mime = _MIME_BY_EXT[m.group(1)]
-    if get_settings().gcs_bucket:
+    if obj.cloud_enabled():
         try:
-            return _gcs_bucket().blob(_object_key(kind, tenant_id, filename)).download_as_bytes(), mime
+            return obj.download_bytes(_object_key(kind, tenant_id, filename)), mime
         except Exception:
             return None
     path = _local_dir(kind, tenant_id) / filename
@@ -139,8 +131,8 @@ def delete_photo(kind: PhotoKind, tenant_id: UUID, stored: str | None) -> None:
     if not filename:
         return
     try:
-        if get_settings().gcs_bucket:
-            _gcs_bucket().blob(_object_key(kind, tenant_id, filename)).delete()
+        if obj.cloud_enabled():
+            obj.delete_object(_object_key(kind, tenant_id, filename))
         else:
             (_local_dir(kind, tenant_id) / filename).unlink(missing_ok=True)
     except Exception:

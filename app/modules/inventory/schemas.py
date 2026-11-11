@@ -167,6 +167,9 @@ class CardItemWrite(BaseModel):
     id: int | None = None
     id_margesi: int | None = None
     no_conciliar: bool = False
+    # App móvil: no reasignar el N° si ya existe (la etiqueta física ya está pegada) y
+    # devolver el detalle del registro en conflicto (HTTP 409) en lugar de solo un texto.
+    strict_inv_num: bool = False
     mar_cpat_num: str = ""
     inv_num: int | None = None
     inv_num_1: str | None = None

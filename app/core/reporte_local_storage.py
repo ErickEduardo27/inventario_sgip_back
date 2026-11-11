@@ -1,4 +1,4 @@
-"""Archivos de Reporte Locales (fotos y PDF): GCS en producción, disco local en desarrollo."""
+"""Archivos de Reporte Locales (fotos y PDF): R2/GCS en producción, disco local en desarrollo."""
 
 from __future__ import annotations
 
@@ -11,11 +11,11 @@ from urllib.parse import quote
 from uuid import UUID
 
 from app.core.config import get_settings
+from app.core import object_storage as obj
 
 MAX_FOTOS = 5
 MAX_PDFS = 2
 LOCAL_PREFIX = "local:"
-_GCS_HOST = "storage.googleapis.com"
 
 
 def _safe_establishment_segment(establishment_id: int) -> str:
@@ -30,20 +30,6 @@ def _fotos_prefix() -> str:
 def _pdfs_prefix() -> str:
     settings = get_settings()
     return (settings.gcs_local_pdf_prefix or "local-pdf").strip("/") or "local-pdf"
-
-
-def _gcs_client():
-    from google.cloud import storage
-
-    settings = get_settings()
-    creds = settings.google_application_credentials.strip()
-    if creds:
-        return storage.Client.from_service_account_json(creds)
-    return storage.Client()
-
-
-def _gcs_public_url(bucket: str, object_key: str) -> str:
-    return f"https://{_GCS_HOST}/{bucket}/{object_key}"
 
 
 def _local_public_url(tenant_id: UUID, kind: str, filename: str) -> str:
@@ -68,13 +54,10 @@ def build_pdf_object_key(*, tenant_id: UUID, establishment_id: int, original_nam
 
 
 def upload_reporte_local_foto(*, tenant_id: UUID, establishment_id: int, content: bytes) -> str:
-    settings = get_settings()
-    if settings.gcs_bucket:
+    if obj.cloud_enabled():
         object_key = build_foto_object_key(tenant_id=tenant_id, establishment_id=establishment_id)
-        client = _gcs_client()
-        blob = client.bucket(settings.gcs_bucket).blob(object_key)
-        blob.upload_from_string(content, content_type="image/jpeg")
-        return _gcs_public_url(settings.gcs_bucket, object_key)
+        obj.upload_bytes(object_key, content, content_type="image/jpeg")
+        return obj.public_object_url(object_key)
 
     est = _safe_establishment_segment(establishment_id)
     filename = f"{est}_{uuid.uuid4().hex[:8]}.jpg"
@@ -91,17 +74,14 @@ def upload_reporte_local_pdf(
     content: bytes,
     original_name: str,
 ) -> str:
-    settings = get_settings()
-    if settings.gcs_bucket:
+    if obj.cloud_enabled():
         object_key = build_pdf_object_key(
             tenant_id=tenant_id,
             establishment_id=establishment_id,
             original_name=original_name,
         )
-        client = _gcs_client()
-        blob = client.bucket(settings.gcs_bucket).blob(object_key)
-        blob.upload_from_string(content, content_type="application/pdf")
-        return _gcs_public_url(settings.gcs_bucket, object_key)
+        obj.upload_bytes(object_key, content, content_type="application/pdf")
+        return obj.public_object_url(object_key)
 
     est = _safe_establishment_segment(establishment_id)
     filename = f"{est}_{uuid.uuid4().hex[:8]}.pdf"
@@ -111,30 +91,8 @@ def upload_reporte_local_pdf(
     return _local_public_url(tenant_id, "pdf", filename)
 
 
-def _parse_gcs_url(url: str) -> tuple[str, str] | None:
-    from urllib.parse import unquote, urlparse
-
-    parsed = urlparse(url.strip())
-    if parsed.netloc != _GCS_HOST:
-        return None
-    path = unquote(parsed.path or "").lstrip("/")
-    if not path or "/" not in path:
-        return None
-    bucket, key = path.split("/", 1)
-    return bucket, key
-
-
 def _tenant_in_object_key(tenant_id: UUID, key: str) -> bool:
     return str(tenant_id) in key.strip("/").split("/")
-
-
-def _download_gcs_object(bucket: str, key: str) -> tuple[bytes, str] | None:
-    try:
-        data = _gcs_client().bucket(bucket).blob(key).download_as_bytes()
-    except Exception:
-        return None
-    mime, _ = mimetypes.guess_type(key)
-    return data, (mime or "application/octet-stream").split(";")[0].strip() or "application/octet-stream"
 
 
 def read_local_reporte_local_file(
@@ -174,48 +132,44 @@ def read_reporte_local_file_bytes(stored: str, tenant_id: UUID) -> tuple[bytes, 
             filename = raw.split(marker, 1)[-1].split("?")[0]
             return read_local_reporte_local_file(tenant_id, kind, filename)
 
-    gcs = _parse_gcs_url(raw)
-    if gcs:
-        bucket, key = gcs
-        if not _tenant_in_object_key(tenant_id, key):
-            return None
-        return _download_gcs_object(bucket, key)
+    if obj.cloud_enabled():
+        key = obj.parse_object_key(raw)
+        if key and _tenant_in_object_key(tenant_id, key):
+            data = obj.download_stored(raw)
+            if data is not None:
+                mime, _ = mimetypes.guess_type(key)
+                default = "image/jpeg" if key.lower().endswith((".jpg", ".jpeg", ".png", ".webp")) else "application/pdf"
+                return data, (mime or default).split(";")[0].strip() or default
 
-    settings = get_settings()
-    fotos_prefix = _fotos_prefix()
-    pdfs_prefix = _pdfs_prefix()
-    if settings.gcs_bucket:
+        fotos_prefix = _fotos_prefix()
+        pdfs_prefix = _pdfs_prefix()
         key = raw.lstrip("/")
         if key.startswith(f"{fotos_prefix}/") or key.startswith(f"{pdfs_prefix}/"):
             if _tenant_in_object_key(tenant_id, key):
-                return _download_gcs_object(settings.gcs_bucket, key)
+                try:
+                    data = obj.download_bytes(key)
+                except Exception:
+                    return None
+                mime, _ = mimetypes.guess_type(key)
+                default = "image/jpeg" if key.startswith(f"{fotos_prefix}/") else "application/pdf"
+                return data, (mime or default).split(";")[0].strip() or default
 
     return None
 
 
 def resolve_gcs_object_key(stored: str, tenant_id: UUID) -> str | None:
-    """Devuelve la clave de objeto GCS si la URL pertenece al tenant."""
+    """Devuelve la clave de objeto si la URL/clave pertenece al tenant."""
     raw = (stored or "").strip()
-    if not raw:
+    if not raw or not obj.cloud_enabled():
         return None
 
-    gcs = _parse_gcs_url(raw)
-    settings = get_settings()
-    if gcs:
-        bucket, key = gcs
-        if settings.gcs_bucket and bucket == settings.gcs_bucket and _tenant_in_object_key(tenant_id, key):
-            return key
+    fotos_prefix = _fotos_prefix()
+    pdfs_prefix = _pdfs_prefix()
+    key = obj.parse_object_key(raw) or raw.lstrip("/")
+    if not key or not _tenant_in_object_key(tenant_id, key):
         return None
-
-    if settings.gcs_bucket:
-        key = raw.lstrip("/")
-        fotos_prefix = _fotos_prefix()
-        pdfs_prefix = _pdfs_prefix()
-        if (key.startswith(f"{fotos_prefix}/") or key.startswith(f"{pdfs_prefix}/")) and _tenant_in_object_key(
-            tenant_id,
-            key,
-        ):
-            return key
+    if key.startswith(f"{fotos_prefix}/") or key.startswith(f"{pdfs_prefix}/"):
+        return key
     return None
 
 
@@ -241,12 +195,12 @@ def generate_reporte_local_signed_url(
     download_filename: str,
     expiration_minutes: int | None = None,
 ) -> tuple[str, datetime | None]:
-    """URL firmada de GCS o ruta API autenticada en desarrollo local."""
+    """URL firmada (R2/GCS) o ruta API autenticada en desarrollo local."""
     from app.core.export_storage import generate_signed_download_url
 
     settings = get_settings()
     key = resolve_gcs_object_key(stored, tenant_id)
-    if key and settings.gcs_bucket:
+    if key and obj.cloud_enabled():
         url, expires_at = generate_signed_download_url(
             key,
             filename=download_filename,
@@ -259,4 +213,4 @@ def generate_reporte_local_signed_url(
         path = build_reporte_local_api_download_path(stored)
         return (f"{base}{path}" if base else path), None
 
-    raise ValueError("Archivo no encontrado o no accesible")
+    raise FileNotFoundError("Archivo no encontrado")

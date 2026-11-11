@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_current_user, get_db, get_tenant_id
 from app.core.export_storage import read_export_file
 from app.core.inventory_numbers import format_inv_num
-from app.modules.iam.dependencies import require_permission
+from app.modules.iam.dependencies import has_permission, require_any_permission, require_permission
 from app.modules.iam.models import User
 from app.modules.inventory import conciliation as conc
 from app.modules.inventory import conciliacion_margesi_service as conc_margesi
@@ -564,7 +564,7 @@ async def _upload_public_photo(kind, file: UploadFile, tenant_id: UUID) -> str:
     except Exception as exc:
         raise HTTPException(
             status_code=500,
-            detail="No se pudo guardar la foto. Revise la configuración de almacenamiento (GCS).",
+            detail="No se pudo guardar la foto. Revise la configuración de almacenamiento (R2/GCS).",
         ) from exc
 
 
@@ -859,6 +859,25 @@ def card_save(
     return OkPayload(success=True, message="Hoja de captura actualizada", id=row.id)
 
 
+def _require_item_write(db: Session, tenant_id: UUID, user: User, body: CardItemWrite) -> None:
+    """Alta de bien → ``hoja_captura:create``; edición → ``hoja_captura:edit`` (igual que la web).
+
+    Quien registró el bien con permiso de alta puede completarlo mientras la hoja siga abierta:
+    la app móvil adjunta las fotos con una edición justo después de crearlo.
+    """
+    if not body.id:
+        if not has_permission(user, db, tenant_id, "hoja_captura", "create"):
+            raise HTTPException(status_code=403, detail="Su perfil no permite registrar bienes en la hoja de captura")
+        return
+    if has_permission(user, db, tenant_id, "hoja_captura", "edit"):
+        return
+    if has_permission(user, db, tenant_id, "hoja_captura", "create") and inv.item_registered_by_in_open_card(
+        db, tenant_id, int(body.id), user.id
+    ):
+        return
+    raise HTTPException(status_code=403, detail="Su perfil no permite editar bienes de la hoja de captura")
+
+
 @router.post("/cards/{card_id}/items", response_model=OkPayload)
 def card_add_item(
     card_id: int,
@@ -867,8 +886,11 @@ def card_add_item(
     tenant_id: UUID = Depends(get_tenant_id),
     user: User = Depends(get_current_user),
 ):
+    _require_item_write(db, tenant_id, user, body)
     result = inv.store_card_item(db, tenant_id, card_id, body, operator_id=user.id)
     if not result.ok:
+        if result.conflict and body.strict_inv_num:
+            raise HTTPException(status_code=409, detail={"message": result.message, **result.conflict})
         raise HTTPException(status_code=400, detail=result.message)
     return OkPayload(
         success=True,
@@ -932,7 +954,7 @@ async def hoja_captura_import(
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
     tenant_id: UUID = Depends(get_tenant_id),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_permission("hoja_captura", "create")),
 ):
     try:
         content, filename = await imp_common.read_upload_bytes(file)
@@ -1079,6 +1101,9 @@ def hoja_captura_edit_item(
     tenant_id: UUID = Depends(get_tenant_id),
     user: User = Depends(get_current_user),
 ):
+    if not body.id:
+        raise HTTPException(status_code=400, detail="ID de ítem requerido")
+    _require_item_write(db, tenant_id, user, body)
     result = inv.edit_card_item(db, tenant_id, body, operator_id=user.id)
     if not result.ok:
         raise HTTPException(status_code=400, detail=result.message)
@@ -1096,7 +1121,7 @@ def hoja_captura_move_item(
     body: ItemCardTranslate,
     db: Session = Depends(get_db),
     tenant_id: UUID = Depends(get_tenant_id),
-    _: User = Depends(get_current_user),
+    _: User = Depends(require_permission("hoja_captura", "edit")),
 ):
     ok, msg = inv.translate_item_card(db, tenant_id, item_id, body)
     if not ok:
@@ -1343,7 +1368,7 @@ def item_card_translate(
     body: ItemCardTranslate,
     db: Session = Depends(get_db),
     tenant_id: UUID = Depends(get_tenant_id),
-    _: User = Depends(get_current_user),
+    _: User = Depends(require_permission("hoja_captura", "edit")),
 ):
     ok, msg = inv.translate_item_card(db, tenant_id, item_id, body)
     if not ok:
@@ -1357,7 +1382,8 @@ def item_card_delete(
     id_card: int = Query(..., description="ID de la hoja (`BienesController::destroy`)"),
     db: Session = Depends(get_db),
     tenant_id: UUID = Depends(get_tenant_id),
-    user: User = Depends(get_current_user),
+    # La web elimina bienes desde Hoja de captura y desde Bienes inventariados.
+    user: User = Depends(require_any_permission("hoja_captura", "bienes", action="delete")),
 ):
     ok, msg = inv.delete_item_card(db, tenant_id, item_id, id_card, operator_id=user.id)
     if not ok:

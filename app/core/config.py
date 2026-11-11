@@ -150,9 +150,33 @@ class Settings(BaseSettings):
         description="Minutos sin latido del worker antes de dar por interrumpida una exportación en proceso.",
     )
 
+    storage_backend: str = Field(
+        default="auto",
+        description="auto | r2 | gcs | local. Con auto: R2 si hay credenciales, si no GCS, si no disco local.",
+        validation_alias=AliasChoices("STORAGE_BACKEND"),
+    )
+    r2_account_id: str = Field(default="", validation_alias=AliasChoices("R2_ACCOUNT_ID"))
+    r2_access_key_id: str = Field(default="", validation_alias=AliasChoices("R2_ACCESS_KEY_ID"))
+    r2_secret_access_key: str = Field(default="", validation_alias=AliasChoices("R2_SECRET_ACCESS_KEY"))
+    r2_bucket: str = Field(
+        default="",
+        description="Bucket de Cloudflare R2. Si está configurado (con claves), tiene prioridad sobre GCS.",
+        validation_alias=AliasChoices("R2_BUCKET"),
+    )
+    r2_endpoint_url: str = Field(
+        default="",
+        description="Endpoint S3 de R2. Vacío = https://{R2_ACCOUNT_ID}.r2.cloudflarestorage.com",
+        validation_alias=AliasChoices("R2_ENDPOINT_URL", "R2_ENDPOINT"),
+    )
+    r2_region: str = Field(default="auto", validation_alias=AliasChoices("R2_REGION"))
+    r2_public_base_url: str = Field(
+        default="",
+        description="CDN/dominio público de R2 (sin barra final). Vacío = fotos privadas vía preview autenticado.",
+        validation_alias=AliasChoices("R2_PUBLIC_BASE_URL", "R2_PUBLIC_URL"),
+    )
     gcs_bucket: str = Field(
         default="",
-        description="Bucket de Google Cloud Storage para archivos de importación. Vacío = almacenamiento local temporal (solo desarrollo).",
+        description="Bucket de Google Cloud Storage (legado). Vacío = almacenamiento local temporal (solo desarrollo).",
     )
     gcs_import_prefix: str = Field(
         default="imports",

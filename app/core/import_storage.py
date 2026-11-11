@@ -1,4 +1,4 @@
-"""Almacenamiento de archivos de importación masiva (GCS en producción, local en dev)."""
+"""Almacenamiento de archivos de importación masiva (R2/GCS en producción, local en dev)."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ from pathlib import Path
 from uuid import UUID
 
 from app.core.config import get_settings
+from app.core import object_storage as obj
 
 LOCAL_PREFIX = "local:"
 
@@ -38,20 +39,15 @@ def upload_import_file(
     filename: str,
     content: bytes,
 ) -> str:
-    """Sube bytes y devuelve la ruta de objeto (GCS key o ``local:/path``)."""
-    settings = get_settings()
-    if settings.gcs_bucket:
-        from google.cloud import storage
-
+    """Sube bytes y devuelve la ruta de objeto (clave R2/GCS o ``local:/path``)."""
+    if obj.cloud_enabled():
         object_key = build_import_object_key(
             module=module,
             tenant_id=tenant_id,
             job_id=job_id,
             filename=filename,
         )
-        client = _gcs_client()
-        blob = client.bucket(settings.gcs_bucket).blob(object_key)
-        blob.upload_from_string(content, content_type=_content_type(filename))
+        obj.upload_bytes(object_key, content, content_type=_content_type(filename))
         return object_key
 
     suffix = Path(filename).suffix or ".xlsx"
@@ -68,12 +64,9 @@ def download_import_file(storage_path: str) -> bytes:
     if storage_path.startswith(LOCAL_PREFIX):
         return Path(storage_path[len(LOCAL_PREFIX) :]).read_bytes()
 
-    settings = get_settings()
-    if not settings.gcs_bucket:
-        raise RuntimeError("GCS_BUCKET no configurado")
-    client = _gcs_client()
-    blob = client.bucket(settings.gcs_bucket).blob(storage_path)
-    return blob.download_as_bytes()
+    if not obj.cloud_enabled():
+        raise RuntimeError("Almacenamiento en la nube no configurado (R2_BUCKET o GCS_BUCKET)")
+    return obj.download_bytes(storage_path)
 
 
 def delete_import_file(storage_path: str) -> None:
@@ -83,20 +76,6 @@ def delete_import_file(storage_path: str) -> None:
             path.unlink(missing_ok=True)
         return
 
-    settings = get_settings()
-    if not settings.gcs_bucket:
+    if not obj.cloud_enabled():
         return
-    client = _gcs_client()
-    blob = client.bucket(settings.gcs_bucket).blob(storage_path)
-    if blob.exists():
-        blob.delete()
-
-
-def _gcs_client():
-    from google.cloud import storage
-
-    settings = get_settings()
-    creds = settings.google_application_credentials.strip()
-    if creds:
-        return storage.Client.from_service_account_json(creds)
-    return storage.Client()
+    obj.delete_object(storage_path)
